@@ -6,18 +6,23 @@ const { Client, GatewayIntentBits, ChannelType } = require("discord.js");
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-const PORT = 3000;
+// ⚠️ IMPORTANTE PARA RENDER
+const PORT = process.env.PORT || 3000;
 
+// ===== VARIÁVEIS =====
 const GUILD_ID = process.env.GUILD_ID;
 const ROLE_PRESIDENTE = process.env.ROLE_PRESIDENTE;
 const ROLE_VICE = process.env.ROLE_VICE;
 const ROLE_CORREGEDORIA = process.env.ROLE_CORREGEDORIA;
 const CHANNEL_PUBLICACOES = process.env.CHANNEL_PUBLICACOES;
 
+// IDs fixos (pode deixar ou mover pra ENV depois)
 const CATEGORIA_PTR = "1207346533985427518";
 const CARGO_SAMU = "1207350835525189672";
 
+// ===== CLIENT DISCORD =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -31,7 +36,8 @@ const client = new Client({
 
 let guildCache = null;
 
-client.once("clientReady", async () => {
+// ===== BOT READY =====
+client.once("ready", async () => {
   console.log(`Bot online: ${client.user.tag}`);
 
   try {
@@ -42,8 +48,8 @@ client.once("clientReady", async () => {
     try {
       await guildCache.members.fetch();
       console.log("Membros carregados em cache.");
-    } catch (err) {
-      console.log("Aviso: não foi possível carregar todos os membros. Usando cache disponível.");
+    } catch {
+      console.log("Aviso: não foi possível carregar todos os membros.");
     }
 
   } catch (err) {
@@ -51,10 +57,11 @@ client.once("clientReady", async () => {
   }
 
   app.listen(PORT, () => {
-    console.log(`API rodando em http://localhost:${PORT}`);
+    console.log(`API rodando na porta ${PORT}`);
   });
 });
 
+// ===== FUNÇÃO AUXILIAR =====
 async function getGuild() {
   if (!guildCache) {
     guildCache = await client.guilds.fetch(GUILD_ID);
@@ -62,6 +69,7 @@ async function getGuild() {
   return guildCache;
 }
 
+// ===== ROTA BASE =====
 app.get("/", (req, res) => {
   res.json({
     status: "online",
@@ -69,6 +77,7 @@ app.get("/", (req, res) => {
   });
 });
 
+// ===== PTR =====
 app.get("/patrulhamento", async (req, res) => {
   try {
     const guild = await getGuild();
@@ -80,10 +89,7 @@ app.get("/patrulhamento", async (req, res) => {
     );
 
     let total = 0;
-
-    canais.forEach(c => {
-      total += c.members.size;
-    });
+    canais.forEach(c => total += c.members.size);
 
     res.json({ total });
 
@@ -93,25 +99,15 @@ app.get("/patrulhamento", async (req, res) => {
   }
 });
 
+// ===== CONTADOR =====
 app.get("/contador", async (req, res) => {
   try {
     const guild = await getGuild();
-
     const role = guild.roles.cache.get(CARGO_SAMU) || await guild.roles.fetch(CARGO_SAMU);
 
     if (!role) {
-      return res.json({
-        total: 0,
-        online: 0,
-        aviso: "Cargo SAMU não encontrado."
-      });
+      return res.json({ total: 0, online: 0 });
     }
-
-    const membrosDoCargo = role.members;
-
-    const online = client.presence.cache
-      ? 0
-      : 0;
 
     let onlineCount = 0;
 
@@ -128,19 +124,17 @@ app.get("/contador", async (req, res) => {
     });
 
     res.json({
-      total: membrosDoCargo.size,
+      total: role.members.size,
       online: onlineCount
     });
 
   } catch (err) {
     console.error("Erro contador:", err.message);
-    res.json({
-      total: "--",
-      online: 0
-    });
+    res.json({ total: 0, online: 0 });
   }
 });
 
+// ===== MEMBROS =====
 app.get("/membros", async (req, res) => {
   try {
     const guild = await getGuild();
@@ -153,15 +147,15 @@ app.get("/membros", async (req, res) => {
 
     const resultado = {};
 
-    for (const [nomeCargo, idCargo] of Object.entries(cargos)) {
-      const role = guild.roles.cache.get(idCargo) || await guild.roles.fetch(idCargo);
+    for (const [nome, id] of Object.entries(cargos)) {
+      const role = guild.roles.cache.get(id) || await guild.roles.fetch(id);
 
       if (!role) {
-        resultado[nomeCargo] = [];
+        resultado[nome] = [];
         continue;
       }
 
-      resultado[nomeCargo] = role.members.map(member => ({
+      resultado[nome] = role.members.map(member => ({
         id: member.user.id,
         nome: member.displayName,
         username: member.user.username,
@@ -174,10 +168,11 @@ app.get("/membros", async (req, res) => {
 
   } catch (err) {
     console.error("Erro membros:", err.message);
-    res.status(500).json({ erro: "Erro membros", detalhe: err.message });
+    res.status(500).json({ erro: "Erro membros" });
   }
 });
 
+// ===== PUBLICAÇÕES =====
 app.get("/publicacoes", async (req, res) => {
   try {
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
@@ -198,4 +193,5 @@ app.get("/publicacoes", async (req, res) => {
   }
 });
 
+// ===== LOGIN =====
 client.login(process.env.DISCORD_TOKEN);
