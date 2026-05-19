@@ -32,6 +32,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const CATEGORIA_PTR = "1207346533985427518";
 const CARGO_SAMU = "1207350835525189672";
+const ROLE_FUNCIONARIO_SEMANA = "1208554148015116329";
+const ROLE_RECRUTADOR_DESTAQUE = "1312642664767684618";
+const ROLE_PROFESSOR_DESTAQUE = "1296282873665687642";
 
 const client = new Client({
   intents: [
@@ -706,7 +709,14 @@ app.get("/contador", async (req, res) => {
 app.get("/membros", async (req, res) => {
   try {
     const guild = await getGuild();
-    const cargos = { "Presidente": ROLE_PRESIDENTE, "Vice-Presidente": ROLE_VICE, "Corregedoria": ROLE_CORREGEDORIA };
+    const cargos = {
+      "Funcionario da Semana": ROLE_FUNCIONARIO_SEMANA,
+      "Recrutador Destaque": ROLE_RECRUTADOR_DESTAQUE,
+      "Professor Destaque": ROLE_PROFESSOR_DESTAQUE,
+      "Presidente": ROLE_PRESIDENTE,
+      "Vice-Presidente": ROLE_VICE,
+      "Corregedoria": ROLE_CORREGEDORIA
+    };
     const resultado = {};
 
     for (const [nome, id] of Object.entries(cargos)) {
