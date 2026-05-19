@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const { Client, GatewayIntentBits, ChannelType } = require("discord.js");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -20,6 +21,9 @@ const CHANNEL_PUBLICACOES = process.env.CHANNEL_PUBLICACOES;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DISCORD_WEBHOOK_SALARIOS = process.env.DISCORD_WEBHOOK_SALARIOS;
+const ADMIN_MASTER_USER = process.env.ADMIN_MASTER_USER || "presid";
+const ADMIN_MASTER_PASS = process.env.ADMIN_MASTER_PASS || "robson2424";
+const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || SUPABASE_SERVICE_ROLE_KEY || "samu-admin-secret";
 
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
 if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
@@ -60,6 +64,8 @@ client.once("ready", async () => {
     console.error("Erro ao preparar servidor:", err.message);
   }
 
+  await ensureMasterAdmin();
+
   app.listen(PORT, () => {
     console.log(`API rodando na porta ${PORT}`);
   });
@@ -85,6 +91,87 @@ function toInt(value) {
   return Number.isFinite(number) ? Math.round(number) : 0;
 }
 
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  return { salt, hash };
+}
+
+function verifyPassword(password, salt, hash) {
+  const attempt = crypto.scryptSync(String(password), salt, 64);
+  const saved = Buffer.from(String(hash || ""), "hex");
+  return saved.length === attempt.length && crypto.timingSafeEqual(saved, attempt);
+}
+
+function createAdminToken(admin) {
+  const payload = {
+    id: admin.id,
+    usuario: admin.usuario,
+    nome: admin.nome || admin.usuario,
+    is_owner: !!admin.is_owner,
+    exp: Date.now() + 1000 * 60 * 60 * 12
+  };
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", ADMIN_TOKEN_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function readAdminToken(req) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token || !token.includes(".")) return null;
+
+  const [body, sig] = token.split(".");
+  const expected = crypto.createHmac("sha256", ADMIN_TOKEN_SECRET).update(body).digest("base64url");
+  if (sig !== expected) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload.exp || payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureMasterAdmin() {
+  const { data: existing, error: selectError } = await supabase
+    .from("admins")
+    .select("id")
+    .eq("usuario", ADMIN_MASTER_USER)
+    .maybeSingle();
+
+  if (selectError) {
+    console.error("Erro ao verificar admin principal. Confira se a tabela admins existe:", selectError.message);
+    return;
+  }
+
+  if (existing) return;
+
+  const password = hashPassword(ADMIN_MASTER_PASS);
+  const { error } = await supabase.from("admins").insert({
+    usuario: ADMIN_MASTER_USER,
+    nome: "Presidencia",
+    senha_hash: password.hash,
+    salt: password.salt,
+    status: "ativo",
+    is_owner: true
+  });
+
+  if (error) console.error("Erro ao criar admin principal:", error.message);
+}
+
+function requireAdmin(req, res, next) {
+  const admin = readAdminToken(req);
+  if (!admin) return res.status(401).json({ erro: "Login administrativo obrigatorio" });
+  req.admin = admin;
+  next();
+}
+
+function requireOwner(req, res, next) {
+  if (!req.admin?.is_owner) return res.status(403).json({ erro: "Apenas a presidencia pode fazer isso" });
+  next();
+}
+
 async function registrarLog({ acao, admin = "sistema", discord_id = "", detalhes = "" }) {
   const { error } = await supabase.from("logs").insert({ acao, admin, discord_id: String(discord_id || ""), detalhes });
   if (error) console.error("Erro ao salvar log:", error);
@@ -98,15 +185,171 @@ app.get("/", (req, res) => {
       "/membros",
       "/contador",
       "/publicacoes",
+      "POST /admin/register",
+      "POST /admin/login",
+      "GET /admin/usuarios",
       "POST /solicitar-salario",
       "POST /multas",
-      "GET /multas",
       "GET /multas/:discord_id",
       "PATCH /multas/:id",
       "PATCH /multas/:id/cancelar",
       "DELETE /multas/:id"
     ]
   });
+});
+
+app.post("/admin/register", async (req, res) => {
+  try {
+    const { usuario, senha, nome } = req.body;
+
+    if (!usuario || !senha) {
+      return res.status(400).json({ erro: "Informe usuario e senha" });
+    }
+
+    if (String(senha).length < 6) {
+      return res.status(400).json({ erro: "A senha precisa ter pelo menos 6 caracteres" });
+    }
+
+    const password = hashPassword(senha);
+    const { data, error } = await supabase
+      .from("admins")
+      .insert({
+        usuario: String(usuario).trim().toLowerCase(),
+        nome: nome || usuario,
+        senha_hash: password.hash,
+        salt: password.salt,
+        status: "pendente",
+        is_owner: false
+      })
+      .select("id, usuario, nome, status, is_owner, created_at")
+      .single();
+
+    if (error) {
+      console.error("Erro ao cadastrar admin:", error);
+      return res.status(400).json({ erro: "Usuario ja existe ou tabela admins nao foi criada" });
+    }
+
+    await registrarLog({ acao: "admin_cadastro_solicitado", admin: "sistema", detalhes: `Cadastro solicitado por ${data.usuario}` });
+    res.json({ sucesso: true, admin: data });
+  } catch (err) {
+    console.error("Erro admin register:", err);
+    res.status(500).json({ erro: "Erro ao cadastrar admin" });
+  }
+});
+
+app.post("/admin/login", async (req, res) => {
+  try {
+    const { usuario, senha } = req.body;
+
+    if (!usuario || !senha) {
+      return res.status(400).json({ erro: "Informe usuario e senha" });
+    }
+
+    const { data: admin, error } = await supabase
+      .from("admins")
+      .select("*")
+      .eq("usuario", String(usuario).trim().toLowerCase())
+      .maybeSingle();
+
+    if (error) {
+      console.error("Erro ao buscar admin:", error);
+      return res.status(500).json({ erro: "Erro ao fazer login" });
+    }
+
+    if (!admin || !verifyPassword(senha, admin.salt, admin.senha_hash)) {
+      return res.status(401).json({ erro: "Usuario ou senha incorretos" });
+    }
+
+    if (admin.status !== "ativo") {
+      return res.status(403).json({ erro: "Conta ainda nao aprovada ou desativada" });
+    }
+
+    const safeAdmin = {
+      id: admin.id,
+      usuario: admin.usuario,
+      nome: admin.nome,
+      status: admin.status,
+      is_owner: !!admin.is_owner
+    };
+
+    await registrarLog({ acao: "admin_login", admin: admin.usuario, detalhes: "Login administrativo realizado" });
+    res.json({ sucesso: true, token: createAdminToken(admin), admin: safeAdmin });
+  } catch (err) {
+    console.error("Erro admin login:", err);
+    res.status(500).json({ erro: "Erro ao fazer login" });
+  }
+});
+
+app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("admins")
+      .select("id, usuario, nome, status, is_owner, created_at")
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ erro: "Erro ao listar usuarios" });
+    res.json(data || []);
+  } catch (err) {
+    console.error("Erro listar admins:", err);
+    res.status(500).json({ erro: "Erro ao listar usuarios" });
+  }
+});
+
+app.patch("/admin/usuarios/:id/aprovar", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from("admins")
+      .update({ status: "ativo" })
+      .eq("id", id)
+      .select("id, usuario, nome, status, is_owner, created_at")
+      .single();
+
+    if (error) return res.status(500).json({ erro: "Erro ao aprovar usuario" });
+    await registrarLog({ acao: "admin_aprovado", admin: req.admin.usuario, detalhes: `Usuario aprovado: ${data.usuario}` });
+    res.json({ sucesso: true, admin: data });
+  } catch (err) {
+    console.error("Erro aprovar admin:", err);
+    res.status(500).json({ erro: "Erro ao aprovar usuario" });
+  }
+});
+
+app.patch("/admin/usuarios/:id/desativar", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from("admins")
+      .update({ status: "desativado" })
+      .eq("id", id)
+      .eq("is_owner", false)
+      .select("id, usuario, nome, status, is_owner, created_at")
+      .single();
+
+    if (error) return res.status(500).json({ erro: "Erro ao desativar usuario" });
+    await registrarLog({ acao: "admin_desativado", admin: req.admin.usuario, detalhes: `Usuario desativado: ${data.usuario}` });
+    res.json({ sucesso: true, admin: data });
+  } catch (err) {
+    console.error("Erro desativar admin:", err);
+    res.status(500).json({ erro: "Erro ao desativar usuario" });
+  }
+});
+
+app.delete("/admin/usuarios/:id", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase
+      .from("admins")
+      .delete()
+      .eq("id", id)
+      .eq("is_owner", false);
+
+    if (error) return res.status(500).json({ erro: "Erro ao remover usuario" });
+    await registrarLog({ acao: "admin_removido", admin: req.admin.usuario, detalhes: `Usuario admin removido: ${id}` });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro remover admin:", err);
+    res.status(500).json({ erro: "Erro ao remover usuario" });
+  }
 });
 
 app.post("/solicitar-salario", async (req, res) => {
@@ -146,7 +389,6 @@ app.post("/solicitar-salario", async (req, res) => {
         status_final: valorRestante > 0 ? "pendente" : "paga"
       };
     });
-
     const valorDescontado = multasProcessadas.reduce((total, multa) => total + multa.valor_abatido, 0);
     const valorPendenteMultas = multasProcessadas.reduce((total, multa) => total + multa.valor_restante, 0);
     const valorPago = Math.max(valorSolicitado - valorDescontado, 0);
@@ -232,22 +474,14 @@ app.post("/solicitar-salario", async (req, res) => {
       });
     }
 
-    res.json({
-      sucesso: true,
-      pagamento,
-      valor_solicitado: valorSolicitado,
-      valor_descontado: valorDescontado,
-      valor_pago: valorPago,
-      valor_pendente_multas: valorPendenteMultas,
-      multas: multasProcessadas
-    });
+    res.json({ sucesso: true, pagamento, valor_solicitado: valorSolicitado, valor_descontado: valorDescontado, valor_pago: valorPago, valor_pendente_multas: valorPendenteMultas, multas: multasProcessadas });
   } catch (err) {
     console.error("Erro solicitar salario:", err);
     res.status(500).json({ erro: "Erro ao solicitar salario" });
   }
 });
 
-app.post("/multas", async (req, res) => {
+app.post("/multas", requireAdmin, async (req, res) => {
   try {
     const { discord_id, nome, valor, motivo, observacao, aplicada_por } = req.body;
 
@@ -276,7 +510,7 @@ app.post("/multas", async (req, res) => {
 
     await registrarLog({
       acao: "multa_criada",
-      admin: aplicada_por || "admin",
+      admin: req.admin.usuario,
       discord_id,
       detalhes: `Multa de ${formatCurrency(valor)} criada. Motivo: ${motivo || "sem motivo"}`
     });
@@ -342,7 +576,7 @@ app.get("/multas/:discord_id", async (req, res) => {
   }
 });
 
-app.patch("/multas/:id", async (req, res) => {
+app.patch("/multas/:id", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { discord_id, nome, valor, motivo, observacao, aplicada_por, status } = req.body;
@@ -370,7 +604,7 @@ app.patch("/multas/:id", async (req, res) => {
 
     await registrarLog({
       acao: "multa_editada",
-      admin: aplicada_por || "admin",
+      admin: req.admin.usuario,
       discord_id: data.discord_id,
       detalhes: `Multa #${id} editada.`
     });
@@ -382,11 +616,9 @@ app.patch("/multas/:id", async (req, res) => {
   }
 });
 
-app.patch("/multas/:id/cancelar", async (req, res) => {
+app.patch("/multas/:id/cancelar", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { admin } = req.body;
-
     const { data, error } = await supabase
       .from("multas")
       .update({ status: "cancelada" })
@@ -399,13 +631,7 @@ app.patch("/multas/:id/cancelar", async (req, res) => {
       return res.status(500).json({ erro: "Erro ao cancelar multa" });
     }
 
-    await registrarLog({
-      acao: "multa_cancelada",
-      admin: admin || "admin",
-      discord_id: data.discord_id,
-      detalhes: `Multa #${id} cancelada.`
-    });
-
+    await registrarLog({ acao: "multa_cancelada", admin: req.admin.usuario, discord_id: data.discord_id, detalhes: `Multa #${id} cancelada.` });
     res.json({ sucesso: true, multa: data });
   } catch (err) {
     console.error("Erro cancelar multa:", err);
@@ -413,7 +639,7 @@ app.patch("/multas/:id/cancelar", async (req, res) => {
   }
 });
 
-app.delete("/multas/:id", async (req, res) => {
+app.delete("/multas/:id", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -435,13 +661,7 @@ app.delete("/multas/:id", async (req, res) => {
       return res.status(500).json({ erro: "Erro ao remover multa" });
     }
 
-    await registrarLog({
-      acao: "multa_removida",
-      admin: "presid",
-      discord_id: multa.discord_id,
-      detalhes: `Multa #${id} removida definitivamente.`
-    });
-
+    await registrarLog({ acao: "multa_removida", admin: req.admin.usuario, discord_id: multa.discord_id, detalhes: `Multa #${id} removida definitivamente.` });
     res.json({ sucesso: true });
   } catch (err) {
     console.error("Erro remover multa:", err);
@@ -486,11 +706,7 @@ app.get("/contador", async (req, res) => {
 app.get("/membros", async (req, res) => {
   try {
     const guild = await getGuild();
-    const cargos = {
-      "Presidente": ROLE_PRESIDENTE,
-      "Vice-Presidente": ROLE_VICE,
-      "Corregedoria": ROLE_CORREGEDORIA
-    };
+    const cargos = { "Presidente": ROLE_PRESIDENTE, "Vice-Presidente": ROLE_VICE, "Corregedoria": ROLE_CORREGEDORIA };
     const resultado = {};
 
     for (const [nome, id] of Object.entries(cargos)) {
@@ -499,7 +715,6 @@ app.get("/membros", async (req, res) => {
         resultado[nome] = [];
         continue;
       }
-
       resultado[nome] = role.members.map(member => ({
         id: member.user.id,
         nome: member.displayName,
@@ -520,14 +735,12 @@ app.get("/publicacoes", async (req, res) => {
   try {
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
     const mensagens = await canal.messages.fetch({ limit: 2 });
-
     const lista = mensagens.map(m => ({
       autor: m.author.username,
       avatar: m.author.displayAvatarURL(),
       conteudo: m.content || "Publicacao sem texto.",
       data: m.createdAt.toLocaleString("pt-BR")
     }));
-
     res.json(lista);
   } catch (err) {
     console.error("Erro publicacoes:", err.message);
