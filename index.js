@@ -745,7 +745,6 @@ app.get("/publicacoes", async (req, res) => {
   try {
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
     const mensagens = await canal.messages.fetch({ limit: 2 });
-    const lista = mensagens.map(m => ({
       const lista = mensagens.map(m => {
   let conteudo = m.content || "Publicacao sem texto.";
 
@@ -761,7 +760,6 @@ app.get("/publicacoes", async (req, res) => {
     data: m.createdAt.toLocaleString("pt-BR")
   };
 });
-    }));
     res.json(lista);
   } catch (err) {
     console.error("Erro publicacoes:", err.message);
