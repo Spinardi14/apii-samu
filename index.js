@@ -746,10 +746,21 @@ app.get("/publicacoes", async (req, res) => {
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
     const mensagens = await canal.messages.fetch({ limit: 2 });
     const lista = mensagens.map(m => ({
-      autor: m.author.username,
-      avatar: m.author.displayAvatarURL(),
-      conteudo: m.content || "Publicacao sem texto.",
-      data: m.createdAt.toLocaleString("pt-BR")
+      const lista = mensagens.map(m => {
+  let conteudo = m.content || "Publicacao sem texto.";
+
+  conteudo = conteudo.replace(/<@&(\d+)>/g, (match, roleId) => {
+    const role = guildCache?.roles?.cache?.get(roleId);
+    return role ? `@${role.name}` : match;
+  });
+
+  return {
+    autor: m.author.username,
+    avatar: m.author.displayAvatarURL(),
+    conteudo,
+    data: m.createdAt.toLocaleString("pt-BR")
+  };
+});
     }));
     res.json(lista);
   } catch (err) {
