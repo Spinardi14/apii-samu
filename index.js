@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const { Client, GatewayIntentBits, ChannelType } = require("discord.js");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -25,6 +26,7 @@ if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
 if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const adminSessions = new Map();
 
 const CATEGORIA_PTR = "1207346533985427518";
 const CARGO_SAMU = "1207350835525189672";
@@ -85,6 +87,59 @@ function toInt(value) {
   return Number.isFinite(number) ? Math.round(number) : 0;
 }
 
+function hashAdminPassword(senha, salt) {
+  return crypto.createHash("sha256").update(`${salt}:${senha}`).digest("hex");
+}
+
+function verifyAdminPassword(senha, salt, senhaHash) {
+  const attempts = [
+    hashAdminPassword(senha, salt),
+    crypto.createHash("sha256").update(`${senha}${salt}`).digest("hex"),
+    crypto.createHash("sha256").update(`${salt}${senha}`).digest("hex"),
+    crypto.createHash("sha256").update(String(senha)).digest("hex")
+  ];
+
+  return attempts.includes(String(senhaHash || ""));
+}
+
+function publicAdmin(admin) {
+  return {
+    id: admin.id,
+    usuario: admin.usuario,
+    nome: admin.nome || "",
+    status: admin.status,
+    is_owner: Boolean(admin.is_owner || admin.usuario === "presid"),
+    created_at: admin.created_at
+  };
+}
+
+function createAdminToken(admin) {
+  const token = crypto.randomBytes(32).toString("hex");
+  adminSessions.set(token, publicAdmin(admin));
+  return token;
+}
+
+function requireAdmin(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const admin = adminSessions.get(token);
+
+  if (!admin) {
+    return res.status(401).json({ erro: "Sessao administrativa invalida." });
+  }
+
+  req.admin = admin;
+  next();
+}
+
+function requireOwner(req, res, next) {
+  if (!req.admin?.is_owner) {
+    return res.status(403).json({ erro: "Apenas o dono pode executar esta acao." });
+  }
+
+  next();
+}
+
 async function registrarLog({ acao, admin = "sistema", discord_id = "", detalhes = "" }) {
   const { error } = await supabase.from("logs").insert({ acao, admin, discord_id: String(discord_id || ""), detalhes });
   if (error) console.error("Erro ao salvar log:", error);
@@ -106,6 +161,160 @@ app.get("/", (req, res) => {
       "DELETE /multas/:id"
     ]
   });
+});
+
+app.post("/admin/register", async (req, res) => {
+  try {
+    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const nome = String(req.body?.nome || "").trim();
+    const senha = String(req.body?.senha || "");
+
+    if (!usuario || !senha) {
+      return res.status(400).json({ erro: "Usuario e senha sao obrigatorios." });
+    }
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const senha_hash = hashAdminPassword(senha, salt);
+
+    const { error } = await supabase.from("admins").insert({
+      usuario,
+      nome,
+      senha_hash,
+      salt,
+      status: "pendente",
+      is_owner: false
+    });
+
+    if (error) throw error;
+
+    await registrarLog({ acao: "admin_registro", admin: usuario, detalhes: "Cadastro administrativo enviado para aprovacao." });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro admin/register:", err.message);
+    res.status(500).json({ erro: "Erro ao cadastrar administrador." });
+  }
+});
+
+app.post("/admin/login", async (req, res) => {
+  try {
+    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const senha = String(req.body?.senha || "");
+
+    if (!usuario || !senha) {
+      return res.status(400).json({ erro: "Usuario e senha sao obrigatorios." });
+    }
+
+    const { data: admin, error } = await supabase
+      .from("admins")
+      .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner")
+      .eq("usuario", usuario)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    const isPresidFallback = usuario === "presid" && senha === "robson2424";
+
+    if (!admin && !isPresidFallback) {
+      return res.status(401).json({ erro: "Usuario ou senha incorretos." });
+    }
+
+    const adminData = admin || {
+      id: "presid",
+      usuario: "presid",
+      nome: "Presidencia",
+      status: "ativo",
+      is_owner: true
+    };
+
+    if (adminData.status !== "ativo" && !isPresidFallback) {
+      return res.status(403).json({ erro: "Conta ainda nao aprovada." });
+    }
+
+    const senhaOk = isPresidFallback || verifyAdminPassword(senha, adminData.salt, adminData.senha_hash);
+
+    if (!senhaOk) {
+      return res.status(401).json({ erro: "Usuario ou senha incorretos." });
+    }
+
+    const token = createAdminToken(adminData);
+    res.json({ sucesso: true, token, admin: publicAdmin(adminData) });
+  } catch (err) {
+    console.error("Erro admin/login:", err.message);
+    res.status(500).json({ erro: "Erro ao fazer login." });
+  }
+});
+
+app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("admins")
+      .select("id, created_at, usuario, nome, status, is_owner")
+      .order("id", { ascending: true });
+
+    if (error) throw error;
+
+    res.json((data || []).map(publicAdmin));
+  } catch (err) {
+    console.error("Erro admin/usuarios:", err.message);
+    res.status(500).json({ erro: "Erro ao listar usuarios." });
+  }
+});
+
+app.patch("/admin/usuarios/:id/:acao", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { id, acao } = req.params;
+    const status = acao === "aprovar" ? "ativo" : acao === "desativar" ? "desativado" : null;
+
+    if (!status) {
+      return res.status(400).json({ erro: "Acao invalida." });
+    }
+
+    const { data: alvo, error: alvoError } = await supabase
+      .from("admins")
+      .select("usuario, is_owner")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (alvoError) throw alvoError;
+    if (alvo?.is_owner) {
+      return res.status(403).json({ erro: "Nao e possivel alterar o dono." });
+    }
+
+    const { error } = await supabase.from("admins").update({ status }).eq("id", id);
+    if (error) throw error;
+
+    await registrarLog({ acao: `admin_${acao}`, admin: req.admin.usuario, detalhes: `Usuario ${alvo?.usuario || id} atualizado para ${status}.` });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro admin/usuarios acao:", err.message);
+    res.status(500).json({ erro: "Erro ao atualizar usuario." });
+  }
+});
+
+app.delete("/admin/usuarios/:id", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: alvo, error: alvoError } = await supabase
+      .from("admins")
+      .select("usuario, is_owner")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (alvoError) throw alvoError;
+    if (alvo?.is_owner) {
+      return res.status(403).json({ erro: "Nao e possivel remover o dono." });
+    }
+
+    const { error } = await supabase.from("admins").delete().eq("id", id);
+    if (error) throw error;
+
+    await registrarLog({ acao: "admin_removido", admin: req.admin.usuario, detalhes: `Usuario ${alvo?.usuario || id} removido.` });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro admin/usuarios delete:", err.message);
+    res.status(500).json({ erro: "Erro ao remover usuario." });
+  }
 });
 
 app.get("/manutencao", async (req, res) => {
