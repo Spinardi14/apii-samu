@@ -90,6 +90,18 @@ function toInt(value) {
   return Number.isFinite(number) ? Math.round(number) : 0;
 }
 
+function formatDateBR(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) return `${match[3]}/${match[2]}/${match[1]}`;
+  return text || "data nao informada";
+}
+
+function formatTurno(value) {
+  const text = String(value || "").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Turno nao informado";
+}
+
 function hashAdminPassword(senha, salt) {
   return crypto.createHash("sha256").update(`${salt}:${senha}`).digest("hex");
 }
@@ -480,7 +492,8 @@ app.post("/solicitar-salario", async (req, res) => {
         `<@&1297725684914847795>\n\n` +
         `**PAGAMENTO PENDENTE:**\n\n` +
         `Solicitante: ${mention}\n` +
-        `${String(dia || "").toUpperCase()} as ${horario || "nao informado"}\n\n` +
+        `Pagamento agendado para:\n` +
+        `${formatDateBR(dia)} as ${horario || "nao informado"} - ${formatTurno(turno)}\n\n` +
         `**HOLERITE:**\n` +
         `Nome: ${nome} | ID: ${id || "nao informado"}\n` +
         `ID usado para multas: ${discord_id}\n` +
