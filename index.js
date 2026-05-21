@@ -30,6 +30,9 @@ const adminSessions = new Map();
 
 const CATEGORIA_PTR = "1207346533985427518";
 const CARGO_SAMU = "1207350835525189672";
+const ROLE_FUNCIONARIO_SEMANA = "1208554148015116329";
+const ROLE_RECRUTADOR_DESTAQUE = "1312642664767684618";
+const ROLE_PROFESSOR_DESTAQUE = "1296282873665687642";
 
 const client = new Client({
   intents: [
@@ -143,6 +146,13 @@ function requireOwner(req, res, next) {
 async function registrarLog({ acao, admin = "sistema", discord_id = "", detalhes = "" }) {
   const { error } = await supabase.from("logs").insert({ acao, admin, discord_id: String(discord_id || ""), detalhes });
   if (error) console.error("Erro ao salvar log:", error);
+}
+
+function substituirMencoesDeCargo(texto, guild) {
+  return String(texto || "Publicacao sem texto.").replace(/<@&(\d+)>/g, (match, roleId) => {
+    const role = guild?.roles?.cache?.get(roleId);
+    return role ? `@${role.name}` : match;
+  });
 }
 
 app.get("/", (req, res) => {
@@ -729,7 +739,14 @@ app.get("/contador", async (req, res) => {
 app.get("/membros", async (req, res) => {
   try {
     const guild = await getGuild();
-    const cargos = { "Presidente": ROLE_PRESIDENTE, "Vice-Presidente": ROLE_VICE, "Corregedoria": ROLE_CORREGEDORIA };
+    const cargos = {
+      "Funcionario da Semana": ROLE_FUNCIONARIO_SEMANA,
+      "Recrutador Destaque": ROLE_RECRUTADOR_DESTAQUE,
+      "Professor Destaque": ROLE_PROFESSOR_DESTAQUE,
+      "Presidente": ROLE_PRESIDENTE,
+      "Vice-Presidente": ROLE_VICE,
+      "Corregedoria": ROLE_CORREGEDORIA
+    };
     const resultado = {};
 
     for (const [nome, id] of Object.entries(cargos)) {
@@ -756,12 +773,14 @@ app.get("/membros", async (req, res) => {
 
 app.get("/publicacoes", async (req, res) => {
   try {
+    const guild = await getGuild();
+    await guild.roles.fetch();
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
     const mensagens = await canal.messages.fetch({ limit: 2 });
     const lista = mensagens.map(m => ({
       autor: m.author.username,
       avatar: m.author.displayAvatarURL(),
-      conteudo: m.content || "Publicacao sem texto.",
+      conteudo: substituirMencoesDeCargo(m.content, guild),
       data: m.createdAt.toLocaleString("pt-BR")
     }));
     res.json(lista);
