@@ -102,6 +102,33 @@ function formatTurno(value) {
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Turno nao informado";
 }
 
+function getCurrentWeekRange() {
+  const now = new Date();
+  const day = now.getDay();
+  const monday = new Date(now);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
+
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 7);
+
+  return { start: monday.toISOString(), end: sunday.toISOString() };
+}
+
+function hasNormalSalaryInObservation(observacao) {
+  const text = String(observacao || "").toLowerCase();
+  if (text.includes("tipo de salario: setor")) return false;
+  if (text.includes("tipo de salario: outros")) return false;
+  return true;
+}
+
+function formatTipoPagamento(tipo) {
+  if (tipo === "salario") return "Salario do cargo";
+  if (tipo === "setor") return "Salario de setor";
+  if (tipo === "outros") return "Outros";
+  return "Salario do cargo + setor";
+}
+
 function hashAdminPassword(senha, salt) {
   return crypto.createHash("sha256").update(`${salt}:${senha}`).digest("hex");
 }
@@ -391,16 +418,38 @@ app.patch("/manutencao", async (req, res) => {
 
 app.post("/solicitar-salario", async (req, res) => {
   try {
-    const { nome, id, discord_id, discord_mention_id, cargo, valor_solicitado, valor_bruto, taxa_financeiro, dia, horario, turno, observacao } = req.body;
+    const { nome, id, discord_id, discord_mention_id, cargo, valor_solicitado, valor_bruto, taxa_financeiro, tipo_pagamento, dia, horario, turno, observacao } = req.body;
 
     if (!nome || !discord_id || !cargo || valor_solicitado === undefined) {
       return res.status(400).json({ erro: "Campos obrigatorios: nome, discord_id, cargo, valor_solicitado" });
     }
 
+    const tipoPagamento = String(tipo_pagamento || "salario").trim().toLowerCase();
+    const tipoPagamentoLabel = formatTipoPagamento(tipoPagamento);
     const valorSolicitado = toInt(valor_solicitado);
     const valorBruto = valor_bruto !== undefined ? toInt(valor_bruto) : valorSolicitado;
     const taxaFinanceiro = taxa_financeiro !== undefined ? toInt(taxa_financeiro) : Math.round(valorSolicitado * 0.10);
     const valorAposTaxa = Math.max(valorSolicitado - taxaFinanceiro, 0);
+
+    if (tipoPagamento === "ambos") {
+      const semana = getCurrentWeekRange();
+      const { data: pagamentosSemana, error: pagamentosSemanaError } = await supabase
+        .from("pagamentos")
+        .select("id, observacao, created_at")
+        .eq("discord_id", String(discord_id))
+        .eq("metodo", "salario")
+        .gte("created_at", semana.start)
+        .lt("created_at", semana.end);
+
+      if (pagamentosSemanaError) {
+        console.error("Erro ao verificar pagamentos da semana:", pagamentosSemanaError);
+        return res.status(500).json({ erro: "Erro ao verificar pagamentos da semana" });
+      }
+
+      if ((pagamentosSemana || []).some(p => hasNormalSalaryInObservation(p.observacao))) {
+        return res.status(400).json({ erro: "Este ID ja solicitou salario normal nesta semana. Solicite apenas o salario de setor." });
+      }
+    }
 
     const { data: multas, error: multasError } = await supabase
       .from("multas")
@@ -443,7 +492,7 @@ app.post("/solicitar-salario", async (req, res) => {
         valor_pago: valorPago,
         metodo: "salario",
         registrado_por: "site",
-        observacao: observacao || `Cargo: ${cargo}`,
+        observacao: observacao || `Tipo de salario: ${tipoPagamento} | Cargo: ${cargo}`,
         status: "pendente"
       })
       .select()
@@ -497,6 +546,7 @@ app.post("/solicitar-salario", async (req, res) => {
         `**HOLERITE:**\n` +
         `Nome: ${nome} | ID: ${id || "nao informado"}\n` +
         `ID usado para multas: ${discord_id}\n` +
+        `Tipo de pagamento: ${tipoPagamentoLabel}\n` +
         `Cargo: ${cargo}\n` +
         `Valor solicitado: **${formatCurrency(valorSolicitado)}**\n` +
         `Taxa Financeiro (-10%): **-${formatCurrency(taxaFinanceiro)}**\n` +
