@@ -277,11 +277,21 @@ app.post("/admin/login", async (req, res) => {
       return res.status(400).json({ erro: "Usuario e senha sao obrigatorios." });
     }
 
-    const { data: admin, error } = await supabase
+    let { data: admin, error } = await supabase
       .from("admins")
       .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner, curso_lider")
       .eq("usuario", usuario)
       .maybeSingle();
+
+    if (error) {
+      const fallback = await supabase
+        .from("admins")
+        .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner")
+        .eq("usuario", usuario)
+        .maybeSingle();
+      admin = fallback.data ? { ...fallback.data, curso_lider: "" } : fallback.data;
+      error = fallback.error;
+    }
 
     if (error) throw error;
 
@@ -320,10 +330,19 @@ app.post("/admin/login", async (req, res) => {
 
 app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("admins")
       .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
       .order("id", { ascending: true });
+
+    if (error) {
+      const fallback = await supabase
+        .from("admins")
+        .select("id, created_at, usuario, nome, status, is_owner")
+        .order("id", { ascending: true });
+      data = (fallback.data || []).map((admin) => ({ ...admin, curso_lider: "" }));
+      error = fallback.error;
+    }
 
     if (error) throw error;
 
