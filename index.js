@@ -28,6 +28,18 @@ if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is re
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const adminSessions = new Map();
 
+const COURSE_CATALOG = {
+  recrutadores: {
+    nome: "Formacao para Recrutadores",
+    externalUrl: "https://www.canva.com/design/DAGnWJcy-bg/rTthp7tTVjf6qUfk00vrbQ/view?utm_content=DAGnWJcy-bg&utm_campaign=designshare&utm_medium=link&utm_source=viewer"
+  },
+  professores: { nome: "Formacao para Professores", storagePath: "professores.pdf" },
+  financeiro: { nome: "Formacao Financeira", storagePath: "financeiro.pdf" },
+  cfs: { nome: "CFS - Formacao para Socorristas", storagePath: "cfs.pdf" },
+  cfm: { nome: "CFM - Formacao para Medicos", storagePath: "cfm.pdf" },
+  desligamento: { nome: "Responsavel por Desligamento / Advertencia", storagePath: "desligamento-advertencia.pdf" }
+};
+
 const CATEGORIA_PTR = "1207346533985427518";
 const CARGO_SAMU = "1207350835525189672";
 const ROLE_FUNCIONARIO_SEMANA = "1208554148015116329";
@@ -151,6 +163,7 @@ function publicAdmin(admin) {
     nome: admin.nome || "",
     status: admin.status,
     is_owner: Boolean(admin.is_owner || admin.usuario === "presid"),
+    curso_lider: admin.curso_lider || "",
     created_at: admin.created_at
   };
 }
@@ -180,6 +193,19 @@ function requireOwner(req, res, next) {
   }
 
   next();
+}
+
+function requireCourseLeader(req, res, next) {
+  if (!req.admin?.is_owner && !req.admin?.curso_lider) {
+    return res.status(403).json({ erro: "Esta conta nao possui permissao de lider de curso." });
+  }
+
+  next();
+}
+
+function normalizeCourse(value) {
+  const course = String(value || "").trim().toLowerCase();
+  return COURSE_CATALOG[course] ? course : "";
 }
 
 async function registrarLog({ acao, admin = "sistema", discord_id = "", detalhes = "" }) {
@@ -231,7 +257,8 @@ app.post("/admin/register", async (req, res) => {
       senha_hash,
       salt,
       status: "pendente",
-      is_owner: false
+      is_owner: false,
+      curso_lider: null
     });
 
     if (error) throw error;
@@ -255,7 +282,7 @@ app.post("/admin/login", async (req, res) => {
 
     const { data: admin, error } = await supabase
       .from("admins")
-      .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner")
+      .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner, curso_lider")
       .eq("usuario", usuario)
       .maybeSingle();
 
@@ -272,7 +299,8 @@ app.post("/admin/login", async (req, res) => {
       usuario: "presid",
       nome: "Presidencia",
       status: "ativo",
-      is_owner: true
+      is_owner: true,
+      curso_lider: ""
     };
 
     if (adminData.status !== "ativo" && !isPresidFallback) {
@@ -297,7 +325,7 @@ app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("admins")
-      .select("id, created_at, usuario, nome, status, is_owner")
+      .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
       .order("id", { ascending: true });
 
     if (error) throw error;
@@ -363,6 +391,186 @@ app.delete("/admin/usuarios/:id", requireAdmin, requireOwner, async (req, res) =
   } catch (err) {
     console.error("Erro admin/usuarios delete:", err.message);
     res.status(500).json({ erro: "Erro ao remover usuario." });
+  }
+});
+
+app.patch("/admin/lideres/:id", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const curso = req.body?.curso ? normalizeCourse(req.body.curso) : "";
+
+    if (req.body?.curso && !curso) {
+      return res.status(400).json({ erro: "Curso invalido." });
+    }
+
+    const { data: alvo, error: alvoError } = await supabase
+      .from("admins")
+      .select("usuario, is_owner")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (alvoError) throw alvoError;
+    if (!alvo) return res.status(404).json({ erro: "Usuario nao encontrado." });
+    if (alvo.is_owner) return res.status(403).json({ erro: "O dono ja possui acesso a todos os cursos." });
+
+    const { error } = await supabase
+      .from("admins")
+      .update({ curso_lider: curso || null })
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+
+    await registrarLog({
+      acao: curso ? "curso_lider_definido" : "curso_lider_removido",
+      admin: req.admin.usuario,
+      detalhes: curso ? `${alvo.usuario} definido como lider de ${curso}.` : `Lideranca de ${alvo.usuario} removida.`
+    });
+
+    res.json({ sucesso: true, curso_lider: curso });
+  } catch (err) {
+    console.error("Erro curso-lider:", err.message);
+    res.status(500).json({ erro: "Erro ao atualizar lider de curso." });
+  }
+});
+
+app.get("/cursos", (req, res) => {
+  res.json(Object.entries(COURSE_CATALOG).map(([codigo, curso]) => ({ codigo, nome: curso.nome })));
+});
+
+app.get("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) => {
+  try {
+    let query = supabase
+      .from("acessos_cursos")
+      .select("id, created_at, discord_id, curso, liberado_por, expires_at, revoked_at")
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .order("expires_at", { ascending: true });
+
+    if (!req.admin.is_owner) query = query.eq("curso", req.admin.curso_lider);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error("Erro ao listar acessos de cursos:", err.message);
+    res.status(500).json({ erro: "Erro ao listar acessos de cursos." });
+  }
+});
+
+app.post("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) => {
+  try {
+    const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
+    const curso = normalizeCourse(req.body?.curso || req.admin.curso_lider);
+
+    if (!/^\d+$/.test(discordId)) {
+      return res.status(400).json({ erro: "Informe um ID do Discord valido, somente com numeros." });
+    }
+    if (!curso) return res.status(400).json({ erro: "Selecione um curso valido." });
+    if (!req.admin.is_owner && curso !== req.admin.curso_lider) {
+      return res.status(403).json({ erro: "Voce somente pode liberar o curso sob sua lideranca." });
+    }
+
+    await supabase
+      .from("acessos_cursos")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("discord_id", discordId)
+      .eq("curso", curso)
+      .is("revoked_at", null);
+
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+      .from("acessos_cursos")
+      .insert({
+        discord_id: discordId,
+        curso,
+        liberado_por: req.admin.usuario,
+        expires_at: expiresAt
+      })
+      .select("id, discord_id, curso, liberado_por, expires_at")
+      .single();
+
+    if (error) throw error;
+
+    await registrarLog({ acao: "curso_acesso_liberado", admin: req.admin.usuario, discord_id: discordId, detalhes: `${curso} liberado por 60 minutos.` });
+    res.json({ sucesso: true, acesso: data });
+  } catch (err) {
+    console.error("Erro ao liberar curso:", err.message);
+    res.status(500).json({ erro: "Erro ao liberar acesso ao curso." });
+  }
+});
+
+app.delete("/cursos/acessos/:id", requireAdmin, requireCourseLeader, async (req, res) => {
+  try {
+    const { data: acesso, error: findError } = await supabase
+      .from("acessos_cursos")
+      .select("id, discord_id, curso")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+    if (!acesso) return res.status(404).json({ erro: "Acesso nao encontrado." });
+    if (!req.admin.is_owner && acesso.curso !== req.admin.curso_lider) {
+      return res.status(403).json({ erro: "Voce nao pode revogar este acesso." });
+    }
+
+    const { error } = await supabase
+      .from("acessos_cursos")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+    await registrarLog({ acao: "curso_acesso_revogado", admin: req.admin.usuario, discord_id: acesso.discord_id, detalhes: `${acesso.curso} revogado.` });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro ao revogar curso:", err.message);
+    res.status(500).json({ erro: "Erro ao revogar acesso ao curso." });
+  }
+});
+
+app.post("/cursos/validar", async (req, res) => {
+  try {
+    const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
+    const curso = normalizeCourse(req.body?.curso);
+
+    if (!/^\d+$/.test(discordId) || !curso) {
+      return res.status(400).json({ erro: "ID ou curso invalido." });
+    }
+
+    const { data: acesso, error } = await supabase
+      .from("acessos_cursos")
+      .select("id, discord_id, curso, expires_at")
+      .eq("discord_id", discordId)
+      .eq("curso", curso)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .order("expires_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!acesso) return res.status(403).json({ erro: "Este ID nao possui acesso ativo para o curso selecionado." });
+
+    const courseData = COURSE_CATALOG[curso];
+    let documentUrl = courseData.externalUrl || "";
+
+    if (courseData.storagePath) {
+      const secondsRemaining = Math.max(1, Math.min(3600, Math.floor((new Date(acesso.expires_at).getTime() - Date.now()) / 1000)));
+      const { data: signed, error: signedError } = await supabase.storage
+        .from("cursos")
+        .createSignedUrl(courseData.storagePath, secondsRemaining);
+
+      if (signedError) throw signedError;
+      documentUrl = signed.signedUrl;
+    }
+
+    res.json({
+      sucesso: true,
+      curso: { codigo: curso, nome: courseData.nome },
+      expires_at: acesso.expires_at,
+      document_url: documentUrl
+    });
+  } catch (err) {
+    console.error("Erro ao validar curso:", err.message);
+    res.status(500).json({ erro: "Erro ao abrir o material do curso." });
   }
 });
 
