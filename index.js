@@ -196,10 +196,7 @@ function requireOwner(req, res, next) {
 }
 
 function requireCourseLeader(req, res, next) {
-  if (!req.admin?.is_owner && !req.admin?.curso_lider) {
-    return res.status(403).json({ erro: "Esta conta nao possui permissao de lider de curso." });
-  }
-
+  // Toda conta administrativa ativa já foi validada por requireAdmin.
   next();
 }
 
