@@ -399,10 +399,8 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
     const nome = String(req.body?.nome || "").trim();
     const usuario = String(req.body?.usuario || "").trim().toLowerCase();
     const senha = String(req.body?.senha || "");
-    const curso = normalizeCourse(req.body?.curso);
-
-    if (!nome || !usuario || !senha || !curso) {
-      return res.status(400).json({ erro: "Preencha nome, usuario, senha e curso." });
+    if (!nome || !usuario || !senha) {
+      return res.status(400).json({ erro: "Preencha nome, usuario e senha." });
     }
 
     if (senha.length < 6) {
@@ -420,7 +418,7 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
         salt,
         status: "ativo",
         is_owner: false,
-        curso_lider: curso
+        curso_lider: "todos"
       })
       .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
       .single();
@@ -435,7 +433,7 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
     await registrarLog({
       acao: "curso_lider_criado",
       admin: req.admin.usuario,
-      detalhes: `${usuario} criado como lider de ${curso}.`
+      detalhes: `${usuario} criado como lider de todos os cursos.`
     });
 
     res.json({ sucesso: true, admin: publicAdmin(data) });
@@ -447,11 +445,7 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
 
 app.patch("/admin/lideres/:id", requireAdmin, requireOwner, async (req, res) => {
   try {
-    const curso = req.body?.curso ? normalizeCourse(req.body.curso) : "";
-
-    if (req.body?.curso && !curso) {
-      return res.status(400).json({ erro: "Curso invalido." });
-    }
+    const curso = req.body?.curso === "todos" ? "todos" : "";
 
     const { data: alvo, error: alvoError } = await supabase
       .from("admins")
@@ -473,7 +467,7 @@ app.patch("/admin/lideres/:id", requireAdmin, requireOwner, async (req, res) => 
     await registrarLog({
       acao: curso ? "curso_lider_definido" : "curso_lider_removido",
       admin: req.admin.usuario,
-      detalhes: curso ? `${alvo.usuario} definido como lider de ${curso}.` : `Lideranca de ${alvo.usuario} removida.`
+      detalhes: curso ? `${alvo.usuario} autorizado para todos os cursos.` : `Lideranca de ${alvo.usuario} removida.`
     });
 
     res.json({ sucesso: true, curso_lider: curso });
@@ -496,8 +490,6 @@ app.get("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) =
       .gt("expires_at", new Date().toISOString())
       .order("expires_at", { ascending: true });
 
-    if (!req.admin.is_owner) query = query.eq("curso", req.admin.curso_lider);
-
     const { data, error } = await query;
     if (error) throw error;
     res.json(data || []);
@@ -510,15 +502,12 @@ app.get("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) =
 app.post("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) => {
   try {
     const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
-    const curso = normalizeCourse(req.body?.curso || req.admin.curso_lider);
+    const curso = normalizeCourse(req.body?.curso);
 
     if (!/^\d+$/.test(discordId)) {
       return res.status(400).json({ erro: "Informe um ID do Discord valido, somente com numeros." });
     }
     if (!curso) return res.status(400).json({ erro: "Selecione um curso valido." });
-    if (!req.admin.is_owner && curso !== req.admin.curso_lider) {
-      return res.status(403).json({ erro: "Voce somente pode liberar o curso sob sua lideranca." });
-    }
 
     await supabase
       .from("acessos_cursos")
@@ -559,10 +548,6 @@ app.delete("/cursos/acessos/:id", requireAdmin, requireCourseLeader, async (req,
 
     if (findError) throw findError;
     if (!acesso) return res.status(404).json({ erro: "Acesso nao encontrado." });
-    if (!req.admin.is_owner && acesso.curso !== req.admin.curso_lider) {
-      return res.status(403).json({ erro: "Voce nao pode revogar este acesso." });
-    }
-
     const { error } = await supabase
       .from("acessos_cursos")
       .update({ revoked_at: new Date().toISOString() })
