@@ -394,6 +394,57 @@ app.delete("/admin/usuarios/:id", requireAdmin, requireOwner, async (req, res) =
   }
 });
 
+app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
+  try {
+    const nome = String(req.body?.nome || "").trim();
+    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const senha = String(req.body?.senha || "");
+    const curso = normalizeCourse(req.body?.curso);
+
+    if (!nome || !usuario || !senha || !curso) {
+      return res.status(400).json({ erro: "Preencha nome, usuario, senha e curso." });
+    }
+
+    if (senha.length < 6) {
+      return res.status(400).json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
+    }
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const senha_hash = hashAdminPassword(senha, salt);
+    const { data, error } = await supabase
+      .from("admins")
+      .insert({
+        usuario,
+        nome,
+        senha_hash,
+        salt,
+        status: "ativo",
+        is_owner: false,
+        curso_lider: curso
+      })
+      .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
+      .single();
+
+    if (error) {
+      if (error.code === "23505") {
+        return res.status(409).json({ erro: "Este usuario ja esta cadastrado." });
+      }
+      throw error;
+    }
+
+    await registrarLog({
+      acao: "curso_lider_criado",
+      admin: req.admin.usuario,
+      detalhes: `${usuario} criado como lider de ${curso}.`
+    });
+
+    res.json({ sucesso: true, admin: publicAdmin(data) });
+  } catch (err) {
+    console.error("Erro ao criar lider de curso:", err.message);
+    res.status(500).json({ erro: "Erro ao criar lider de curso." });
+  }
+});
+
 app.patch("/admin/lideres/:id", requireAdmin, requireOwner, async (req, res) => {
   try {
     const curso = req.body?.curso ? normalizeCourse(req.body.curso) : "";
