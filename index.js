@@ -54,6 +54,9 @@ const CARGO_SAMU = "1207350835525189672";
 const ROLE_FUNCIONARIO_SEMANA = "1208554148015116329";
 const ROLE_RECRUTADOR_DESTAQUE = "1312642664767684618";
 const ROLE_PROFESSOR_DESTAQUE = "1296282873665687642";
+const ROLE_LIDER_RECRUTADORES = "1490842864492744784";
+const ROLE_LIDER_PROFESSORES = "1490842864492744784";
+const ROLE_LIDER_FINANCEIRO = "1490842590826725406";
 
 const client = new Client({
   intents: [
@@ -138,6 +141,31 @@ function getCurrentWeekRange() {
   return { start: monday.toISOString(), end: sunday.toISOString() };
 }
 
+function getFinancialWeekRange() {
+  const now = new Date();
+  const saoPauloNow = new Date(
+    now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }),
+  );
+  const day = saoPauloNow.getDay();
+  const start = new Date(saoPauloNow);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(
+    saoPauloNow.getDate() - (day === 0 ? 0 : day - 1),
+  );
+  const end = new Date(start);
+  end.setDate(start.getDate() + (day === 0 ? 6 : 5));
+  end.setHours(23, 59, 59, 999);
+
+  const offsetMs = 3 * 60 * 60 * 1000;
+  return {
+    start: new Date(start.getTime() + offsetMs).toISOString(),
+    end: new Date(end.getTime() + offsetMs).toISOString(),
+    inicio: start.toLocaleDateString("pt-BR"),
+    fim: end.toLocaleDateString("pt-BR"),
+    fechamento: `${end.toLocaleDateString("pt-BR")} as 23:59`,
+  };
+}
+
 function hasNormalSalaryInObservation(observacao) {
   const text = String(observacao || "").toLowerCase();
   if (text.includes("tipo de salario: setor")) return false;
@@ -175,6 +203,7 @@ function publicMember(member) {
   return {
     id: member.id,
     nome: member.nome,
+    ingame_id: member.ingame_id || "",
     discord_id: member.discord_id,
     discord_nome: member.discord_nome || "",
     avatar_url: member.avatar_url || "",
@@ -202,7 +231,7 @@ async function requireMember(req, res, next) {
     const { data: member, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, discord_id, discord_nome, avatar_url, status",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status",
       )
       .eq("id", sessionMember.id)
       .maybeSingle();
@@ -315,11 +344,15 @@ app.get("/", (req, res) => {
 app.post("/portal/registrar", async (req, res) => {
   try {
     const nomeInformado = String(req.body?.nome || "").trim();
+    const ingameId = String(req.body?.ingame_id || "").replace(/\D/g, "");
     const discordId = String(req.body?.discord_id || "").replace(/\D/g, "");
     const senha = String(req.body?.senha || "");
 
     if (!nomeInformado)
       return res.status(400).json({ erro: "Informe seu nome." });
+    if (!ingameId) {
+      return res.status(400).json({ erro: "Informe seu ID in-game." });
+    }
     if (!/^\d{17,20}$/.test(discordId)) {
       return res.status(400).json({
         erro: "Informe o ID de Desenvolvedor do Discord, com 17 a 20 digitos.",
@@ -347,21 +380,37 @@ app.post("/portal/registrar", async (req, res) => {
     const discordNome =
       discordMember.displayName || discordMember.user.username;
 
-    const { error } = await supabase.from("membros_portal").insert({
+    const { data: existingMember, error: existingError } = await supabase
+      .from("membros_portal")
+      .select("id, ingame_id")
+      .eq("discord_id", discordId)
+      .maybeSingle();
+    if (existingError) throw existingError;
+
+    const memberRecord = {
       nome: nomeInformado,
+      ingame_id: ingameId,
       discord_id: discordId,
       discord_nome: discordNome,
       avatar_url: avatarUrl,
       senha_hash,
       salt,
       status: "pendente",
-    });
+    };
+    const operation = existingMember
+      ? supabase
+          .from("membros_portal")
+          .update(memberRecord)
+          .eq("id", existingMember.id)
+      : supabase.from("membros_portal").insert(memberRecord);
+    const { error } = await operation;
 
     if (error) {
-      if (error.code === "23505")
+      if (error.code === "23505") {
         return res
           .status(409)
-          .json({ erro: "Este ID do Discord ja possui cadastro." });
+          .json({ erro: "Este ID in-game ou ID do Discord ja possui cadastro." });
+      }
       throw error;
     }
 
@@ -383,15 +432,15 @@ app.post("/portal/registrar", async (req, res) => {
 
 app.post("/portal/login", async (req, res) => {
   try {
-    const discordId = String(req.body?.discord_id || "").replace(/\D/g, "");
+    const ingameId = String(req.body?.ingame_id || "").replace(/\D/g, "");
     const senha = String(req.body?.senha || "");
 
     const { data: member, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, discord_id, discord_nome, avatar_url, senha_hash, salt, status",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, senha_hash, salt, status",
       )
-      .eq("discord_id", discordId)
+      .eq("ingame_id", ingameId)
       .maybeSingle();
 
     if (error) throw error;
@@ -401,7 +450,7 @@ app.post("/portal/login", async (req, res) => {
     ) {
       return res
         .status(401)
-        .json({ erro: "ID do Discord ou senha incorretos." });
+        .json({ erro: "ID in-game ou senha incorretos." });
     }
     if (member.status !== "ativo") {
       return res.status(403).json({
@@ -457,6 +506,68 @@ app.get("/portal/online", async (req, res) => {
   }
 });
 
+app.post("/portal/compras-cargos", requireMember, async (req, res) => {
+  try {
+    const metodo = String(req.body?.metodo || "").toLowerCase();
+    const cargo = String(req.body?.cargo || "").trim();
+    const valorBruto = Number(req.body?.valor_bruto || 0);
+    const lucroSamu = Number(req.body?.lucro_samu || 0);
+
+    if (!["ingame", "pix"].includes(metodo) || !cargo || lucroSamu < 0) {
+      return res.status(400).json({ erro: "Dados da compra invalidos." });
+    }
+
+    const { data, error } = await supabase
+      .from("compras_cargos")
+      .insert({
+        membro_id: req.member.id,
+        ingame_id: req.member.ingame_id,
+        discord_id: req.member.discord_id,
+        metodo,
+        cargo,
+        valor_bruto: valorBruto,
+        lucro_samu: lucroSamu,
+      })
+      .select("id, created_at")
+      .single();
+    if (error) throw error;
+    res.json({ sucesso: true, compra: data });
+  } catch (err) {
+    console.error("Erro ao registrar compra de cargo:", err.message);
+    res.status(500).json({ erro: "Erro ao registrar a compra." });
+  }
+});
+
+app.get("/transparencia/cargos", async (req, res) => {
+  try {
+    const semana = getFinancialWeekRange();
+    const { data, error } = await supabase
+      .from("compras_cargos")
+      .select("metodo, lucro_samu")
+      .gte("created_at", semana.start)
+      .lte("created_at", semana.end);
+    if (error) throw error;
+
+    const totais = (data || []).reduce(
+      (acc, compra) => {
+        const metodo = compra.metodo === "pix" ? "pix" : "ingame";
+        acc[metodo] += Number(compra.lucro_samu || 0);
+        return acc;
+      },
+      { ingame: 0, pix: 0 },
+    );
+
+    res.json({
+      semana: `${semana.inicio} a ${semana.fim}`,
+      fechamento: semana.fechamento,
+      ...totais,
+    });
+  } catch (err) {
+    console.error("Erro transparencia de cargos:", err.message);
+    res.status(500).json({ erro: "Erro ao carregar a transparencia." });
+  }
+});
+
 app.get("/portal/chat", requireMember, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -506,7 +617,7 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
     const { data, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, discord_id, discord_nome, avatar_url, status, last_seen_at",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status, last_seen_at",
       )
       .order("created_at", { ascending: false });
     if (error) throw error;
@@ -771,13 +882,13 @@ app.delete(
 
 app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
   try {
-    const nome = String(req.body?.nome || "").trim();
     const usuario = String(req.body?.usuario || "")
       .trim()
       .toLowerCase();
+    const nome = String(req.body?.nome || usuario).trim();
     const senha = String(req.body?.senha || "");
-    if (!nome || !usuario || !senha) {
-      return res.status(400).json({ erro: "Preencha nome, usuario e senha." });
+    if (!usuario || !senha) {
+      return res.status(400).json({ erro: "Preencha usuario e senha." });
     }
 
     if (senha.length < 6) {
@@ -1118,8 +1229,8 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
       observacao,
     } = req.body;
     const nome = req.member.nome;
-    const id = req.member.discord_id;
-    const discord_id = req.member.discord_id;
+    const id = req.member.ingame_id;
+    const discord_id = req.member.ingame_id;
     const discord_mention_id = req.member.discord_id;
 
     if (!nome || !discord_id || !cargo || valor_solicitado === undefined) {
@@ -1589,6 +1700,9 @@ app.get("/membros", async (req, res) => {
       Presidente: ROLE_PRESIDENTE,
       "Vice-Presidente": ROLE_VICE,
       Corregedoria: ROLE_CORREGEDORIA,
+      "Lider de Recrutadores": ROLE_LIDER_RECRUTADORES,
+      "Lider de Professores": ROLE_LIDER_PROFESSORES,
+      "Lider Financeiro": ROLE_LIDER_FINANCEIRO,
     };
     const resultado = {};
 
