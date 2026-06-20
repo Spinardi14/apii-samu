@@ -23,21 +23,30 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DISCORD_WEBHOOK_SALARIOS = process.env.DISCORD_WEBHOOK_SALARIOS;
 
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
-if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
+if (!SUPABASE_SERVICE_ROLE_KEY)
+  throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const adminSessions = new Map();
+const memberSessions = new Map();
 
 const COURSE_CATALOG = {
   recrutadores: {
     nome: "Formacao para Recrutadores",
-    externalUrl: "https://www.canva.com/design/DAGnWJcy-bg/rTthp7tTVjf6qUfk00vrbQ/view?utm_content=DAGnWJcy-bg&utm_campaign=designshare&utm_medium=link&utm_source=viewer"
+    externalUrl:
+      "https://www.canva.com/design/DAGnWJcy-bg/rTthp7tTVjf6qUfk00vrbQ/view?utm_content=DAGnWJcy-bg&utm_campaign=designshare&utm_medium=link&utm_source=viewer",
   },
-  professores: { nome: "Formacao para Professores", storagePath: "professores.pdf" },
+  professores: {
+    nome: "Formacao para Professores",
+    storagePath: "professores.pdf",
+  },
   financeiro: { nome: "Formacao Financeira", storagePath: "financeiro.pdf" },
   cfs: { nome: "CFS - Formacao para Socorristas", storagePath: "cfs.pdf" },
   cfm: { nome: "CFM - Formacao para Medicos", storagePath: "cfm.pdf" },
-  desligamento: { nome: "Responsavel por Desligamento / Advertencia", storagePath: "desligamento-advertencia.pdf" }
+  desligamento: {
+    nome: "Responsavel por Desligamento / Advertencia",
+    storagePath: "desligamento-advertencia.pdf",
+  },
 };
 
 const CATEGORIA_PTR = "1207346533985427518";
@@ -53,8 +62,8 @@ const client = new Client({
     GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates
-  ]
+    GatewayIntentBits.GuildVoiceStates,
+  ],
 });
 
 let guildCache = null;
@@ -93,7 +102,7 @@ function formatCurrency(value) {
   return Number(value || 0).toLocaleString("pt-BR", {
     style: "currency",
     currency: "BRL",
-    maximumFractionDigits: 0
+    maximumFractionDigits: 0,
   });
 }
 
@@ -111,7 +120,9 @@ function formatDateBR(value) {
 
 function formatTurno(value) {
   const text = String(value || "").trim();
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Turno nao informado";
+  return text
+    ? text.charAt(0).toUpperCase() + text.slice(1)
+    : "Turno nao informado";
 }
 
 function getCurrentWeekRange() {
@@ -150,10 +161,62 @@ function verifyAdminPassword(senha, salt, senhaHash) {
     hashAdminPassword(senha, salt),
     crypto.createHash("sha256").update(`${senha}${salt}`).digest("hex"),
     crypto.createHash("sha256").update(`${salt}${senha}`).digest("hex"),
-    crypto.createHash("sha256").update(String(senha)).digest("hex")
+    crypto.createHash("sha256").update(String(senha)).digest("hex"),
   ];
 
   return attempts.includes(String(senhaHash || ""));
+}
+
+function hashMemberPassword(senha, salt) {
+  return crypto.createHash("sha256").update(`${salt}:${senha}`).digest("hex");
+}
+
+function publicMember(member) {
+  return {
+    id: member.id,
+    nome: member.nome,
+    discord_id: member.discord_id,
+    discord_nome: member.discord_nome || "",
+    avatar_url: member.avatar_url || "",
+    status: member.status,
+    created_at: member.created_at,
+  };
+}
+
+function createMemberToken(member) {
+  const token = crypto.randomBytes(32).toString("hex");
+  memberSessions.set(token, publicMember(member));
+  return token;
+}
+
+async function requireMember(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const sessionMember = memberSessions.get(token);
+
+  if (!sessionMember) {
+    return res.status(401).json({ erro: "Sessao do portal invalida." });
+  }
+
+  try {
+    const { data: member, error } = await supabase
+      .from("membros_portal")
+      .select(
+        "id, created_at, nome, discord_id, discord_nome, avatar_url, status",
+      )
+      .eq("id", sessionMember.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!member || member.status !== "ativo") {
+      memberSessions.delete(token);
+      return res.status(403).json({ erro: "Esta conta nao esta mais ativa." });
+    }
+    req.member = publicMember(member);
+    req.memberToken = token;
+    next();
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao validar a conta do portal." });
+  }
 }
 
 function publicAdmin(admin) {
@@ -164,7 +227,7 @@ function publicAdmin(admin) {
     status: admin.status,
     is_owner: Boolean(admin.is_owner || admin.usuario === "presid"),
     curso_lider: admin.curso_lider || "",
-    created_at: admin.created_at
+    created_at: admin.created_at,
   };
 }
 
@@ -189,7 +252,9 @@ function requireAdmin(req, res, next) {
 
 function requireOwner(req, res, next) {
   if (!req.admin?.is_owner) {
-    return res.status(403).json({ erro: "Apenas o dono pode executar esta acao." });
+    return res
+      .status(403)
+      .json({ erro: "Apenas o dono pode executar esta acao." });
   }
 
   next();
@@ -201,20 +266,32 @@ function requireCourseLeader(req, res, next) {
 }
 
 function normalizeCourse(value) {
-  const course = String(value || "").trim().toLowerCase();
+  const course = String(value || "")
+    .trim()
+    .toLowerCase();
   return COURSE_CATALOG[course] ? course : "";
 }
 
-async function registrarLog({ acao, admin = "sistema", discord_id = "", detalhes = "" }) {
-  const { error } = await supabase.from("logs").insert({ acao, admin, discord_id: String(discord_id || ""), detalhes });
+async function registrarLog({
+  acao,
+  admin = "sistema",
+  discord_id = "",
+  detalhes = "",
+}) {
+  const { error } = await supabase
+    .from("logs")
+    .insert({ acao, admin, discord_id: String(discord_id || ""), detalhes });
   if (error) console.error("Erro ao salvar log:", error);
 }
 
 function substituirMencoesDeCargo(texto, guild) {
-  return String(texto || "Publicacao sem texto.").replace(/<@&(\d+)>/g, (match, roleId) => {
-    const role = guild?.roles?.cache?.get(roleId);
-    return role ? `@${role.name}` : match;
-  });
+  return String(texto || "Publicacao sem texto.").replace(
+    /<@&(\d+)>/g,
+    (match, roleId) => {
+      const role = guild?.roles?.cache?.get(roleId);
+      return role ? `@${role.name}` : match;
+    },
+  );
 }
 
 app.get("/", (req, res) => {
@@ -230,19 +307,256 @@ app.get("/", (req, res) => {
       "GET /multas/:discord_id",
       "PATCH /multas/:id",
       "PATCH /multas/:id/cancelar",
-      "DELETE /multas/:id"
-    ]
+      "DELETE /multas/:id",
+    ],
   });
+});
+
+app.post("/portal/registrar", async (req, res) => {
+  try {
+    const nomeInformado = String(req.body?.nome || "").trim();
+    const discordId = String(req.body?.discord_id || "").replace(/\D/g, "");
+    const senha = String(req.body?.senha || "");
+
+    if (!nomeInformado)
+      return res.status(400).json({ erro: "Informe seu nome." });
+    if (!/^\d{17,20}$/.test(discordId)) {
+      return res.status(400).json({
+        erro: "Informe o ID de Desenvolvedor do Discord, com 17 a 20 digitos.",
+      });
+    }
+    if (senha.length < 6) {
+      return res
+        .status(400)
+        .json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
+    }
+
+    const guild = await getGuild();
+    let discordMember = null;
+    try {
+      discordMember = await guild.members.fetch(discordId);
+    } catch {
+      return res
+        .status(400)
+        .json({ erro: "Este ID nao foi localizado no servidor do Discord." });
+    }
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const senha_hash = hashMemberPassword(senha, salt);
+    const avatarUrl = discordMember.user.displayAvatarURL({ size: 256 });
+    const discordNome =
+      discordMember.displayName || discordMember.user.username;
+
+    const { error } = await supabase.from("membros_portal").insert({
+      nome: nomeInformado,
+      discord_id: discordId,
+      discord_nome: discordNome,
+      avatar_url: avatarUrl,
+      senha_hash,
+      salt,
+      status: "pendente",
+    });
+
+    if (error) {
+      if (error.code === "23505")
+        return res
+          .status(409)
+          .json({ erro: "Este ID do Discord ja possui cadastro." });
+      throw error;
+    }
+
+    await registrarLog({
+      acao: "portal_registro",
+      admin: discordNome,
+      discord_id: discordId,
+      detalhes: "Cadastro de membro enviado para aprovacao.",
+    });
+    res.json({
+      sucesso: true,
+      mensagem: "Cadastro enviado. Aguarde a aprovacao de um administrador.",
+    });
+  } catch (err) {
+    console.error("Erro portal/registrar:", err.message);
+    res.status(500).json({ erro: "Erro ao criar cadastro no portal." });
+  }
+});
+
+app.post("/portal/login", async (req, res) => {
+  try {
+    const discordId = String(req.body?.discord_id || "").replace(/\D/g, "");
+    const senha = String(req.body?.senha || "");
+
+    const { data: member, error } = await supabase
+      .from("membros_portal")
+      .select(
+        "id, created_at, nome, discord_id, discord_nome, avatar_url, senha_hash, salt, status",
+      )
+      .eq("discord_id", discordId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (
+      !member ||
+      hashMemberPassword(senha, member.salt) !== member.senha_hash
+    ) {
+      return res
+        .status(401)
+        .json({ erro: "ID do Discord ou senha incorretos." });
+    }
+    if (member.status !== "ativo") {
+      return res.status(403).json({
+        erro:
+          member.status === "pendente"
+            ? "Cadastro aguardando aprovacao."
+            : "Esta conta esta desativada.",
+      });
+    }
+
+    await supabase
+      .from("membros_portal")
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq("id", member.id);
+    const token = createMemberToken(member);
+    res.json({ sucesso: true, token, membro: publicMember(member) });
+  } catch (err) {
+    console.error("Erro portal/login:", err.message);
+    res.status(500).json({ erro: "Erro ao entrar no portal." });
+  }
+});
+
+app.get("/portal/me", requireMember, (req, res) => {
+  res.json({ sucesso: true, membro: req.member });
+});
+
+app.post("/portal/heartbeat", requireMember, async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("membros_portal")
+      .update({ last_seen_at: now })
+      .eq("id", req.member.id);
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao atualizar presenca." });
+  }
+});
+
+app.get("/portal/online", async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const { count, error } = await supabase
+      .from("membros_portal")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "ativo")
+      .gte("last_seen_at", since);
+    if (error) throw error;
+    res.json({ online: count || 0 });
+  } catch (err) {
+    res.json({ online: 0 });
+  }
+});
+
+app.get("/portal/chat", requireMember, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("chat_portal")
+      .select(
+        "id, created_at, membro_id, nome, discord_id, avatar_url, mensagem",
+      )
+      .order("created_at", { ascending: false })
+      .limit(60);
+    if (error) throw error;
+    res.json((data || []).reverse());
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao carregar o chat." });
+  }
+});
+
+app.post("/portal/chat", requireMember, async (req, res) => {
+  try {
+    const mensagem = String(req.body?.mensagem || "")
+      .trim()
+      .slice(0, 500);
+    if (!mensagem)
+      return res.status(400).json({ erro: "Digite uma mensagem." });
+
+    const { data, error } = await supabase
+      .from("chat_portal")
+      .insert({
+        membro_id: req.member.id,
+        nome: req.member.nome,
+        discord_id: req.member.discord_id,
+        avatar_url: req.member.avatar_url,
+        mensagem,
+      })
+      .select(
+        "id, created_at, membro_id, nome, discord_id, avatar_url, mensagem",
+      )
+      .single();
+    if (error) throw error;
+    res.json({ sucesso: true, mensagem: data });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao enviar mensagem." });
+  }
+});
+
+app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("membros_portal")
+      .select(
+        "id, created_at, nome, discord_id, discord_nome, avatar_url, status, last_seen_at",
+      )
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao carregar membros do portal." });
+  }
+});
+
+app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
+  try {
+    const status = req.params.acao === "aprovar" ? "ativo" : "desativado";
+    if (!["aprovar", "desativar"].includes(req.params.acao))
+      return res.status(400).json({ erro: "Acao invalida." });
+    const { error } = await supabase
+      .from("membros_portal")
+      .update({ status })
+      .eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao atualizar membro." });
+  }
+});
+
+app.delete("/admin/membros-portal/:id", requireAdmin, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("membros_portal")
+      .delete()
+      .eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao remover membro." });
+  }
 });
 
 app.post("/admin/register", async (req, res) => {
   try {
-    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const usuario = String(req.body?.usuario || "")
+      .trim()
+      .toLowerCase();
     const nome = String(req.body?.nome || "").trim();
     const senha = String(req.body?.senha || "");
 
     if (!usuario || !senha) {
-      return res.status(400).json({ erro: "Usuario e senha sao obrigatorios." });
+      return res
+        .status(400)
+        .json({ erro: "Usuario e senha sao obrigatorios." });
     }
 
     const salt = crypto.randomBytes(16).toString("hex");
@@ -255,12 +569,16 @@ app.post("/admin/register", async (req, res) => {
       salt,
       status: "pendente",
       is_owner: false,
-      curso_lider: null
+      curso_lider: null,
     });
 
     if (error) throw error;
 
-    await registrarLog({ acao: "admin_registro", admin: usuario, detalhes: "Cadastro administrativo enviado para aprovacao." });
+    await registrarLog({
+      acao: "admin_registro",
+      admin: usuario,
+      detalhes: "Cadastro administrativo enviado para aprovacao.",
+    });
     res.json({ sucesso: true });
   } catch (err) {
     console.error("Erro admin/register:", err.message);
@@ -270,26 +588,36 @@ app.post("/admin/register", async (req, res) => {
 
 app.post("/admin/login", async (req, res) => {
   try {
-    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const usuario = String(req.body?.usuario || "")
+      .trim()
+      .toLowerCase();
     const senha = String(req.body?.senha || "");
 
     if (!usuario || !senha) {
-      return res.status(400).json({ erro: "Usuario e senha sao obrigatorios." });
+      return res
+        .status(400)
+        .json({ erro: "Usuario e senha sao obrigatorios." });
     }
 
     let { data: admin, error } = await supabase
       .from("admins")
-      .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner, curso_lider")
+      .select(
+        "id, created_at, usuario, nome, senha_hash, salt, status, is_owner, curso_lider",
+      )
       .eq("usuario", usuario)
       .maybeSingle();
 
     if (error) {
       const fallback = await supabase
         .from("admins")
-        .select("id, created_at, usuario, nome, senha_hash, salt, status, is_owner")
+        .select(
+          "id, created_at, usuario, nome, senha_hash, salt, status, is_owner",
+        )
         .eq("usuario", usuario)
         .maybeSingle();
-      admin = fallback.data ? { ...fallback.data, curso_lider: "" } : fallback.data;
+      admin = fallback.data
+        ? { ...fallback.data, curso_lider: "" }
+        : fallback.data;
       error = fallback.error;
     }
 
@@ -307,14 +635,16 @@ app.post("/admin/login", async (req, res) => {
       nome: "Presidencia",
       status: "ativo",
       is_owner: true,
-      curso_lider: ""
+      curso_lider: "",
     };
 
     if (adminData.status !== "ativo" && !isPresidFallback) {
       return res.status(403).json({ erro: "Conta ainda nao aprovada." });
     }
 
-    const senhaOk = isPresidFallback || verifyAdminPassword(senha, adminData.salt, adminData.senha_hash);
+    const senhaOk =
+      isPresidFallback ||
+      verifyAdminPassword(senha, adminData.salt, adminData.senha_hash);
 
     if (!senhaOk) {
       return res.status(401).json({ erro: "Usuario ou senha incorretos." });
@@ -340,7 +670,10 @@ app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
         .from("admins")
         .select("id, created_at, usuario, nome, status, is_owner")
         .order("id", { ascending: true });
-      data = (fallback.data || []).map((admin) => ({ ...admin, curso_lider: "" }));
+      data = (fallback.data || []).map((admin) => ({
+        ...admin,
+        curso_lider: "",
+      }));
       error = fallback.error;
     }
 
@@ -353,74 +686,104 @@ app.get("/admin/usuarios", requireAdmin, requireOwner, async (req, res) => {
   }
 });
 
-app.patch("/admin/usuarios/:id/:acao", requireAdmin, requireOwner, async (req, res) => {
-  try {
-    const { id, acao } = req.params;
-    const status = acao === "aprovar" ? "ativo" : acao === "desativar" ? "desativado" : null;
+app.patch(
+  "/admin/usuarios/:id/:acao",
+  requireAdmin,
+  requireOwner,
+  async (req, res) => {
+    try {
+      const { id, acao } = req.params;
+      const status =
+        acao === "aprovar"
+          ? "ativo"
+          : acao === "desativar"
+            ? "desativado"
+            : null;
 
-    if (!status) {
-      return res.status(400).json({ erro: "Acao invalida." });
+      if (!status) {
+        return res.status(400).json({ erro: "Acao invalida." });
+      }
+
+      const { data: alvo, error: alvoError } = await supabase
+        .from("admins")
+        .select("usuario, is_owner")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (alvoError) throw alvoError;
+      if (alvo?.is_owner) {
+        return res.status(403).json({ erro: "Nao e possivel alterar o dono." });
+      }
+
+      const { error } = await supabase
+        .from("admins")
+        .update({ status })
+        .eq("id", id);
+      if (error) throw error;
+
+      await registrarLog({
+        acao: `admin_${acao}`,
+        admin: req.admin.usuario,
+        detalhes: `Usuario ${alvo?.usuario || id} atualizado para ${status}.`,
+      });
+      res.json({ sucesso: true });
+    } catch (err) {
+      console.error("Erro admin/usuarios acao:", err.message);
+      res.status(500).json({ erro: "Erro ao atualizar usuario." });
     }
+  },
+);
 
-    const { data: alvo, error: alvoError } = await supabase
-      .from("admins")
-      .select("usuario, is_owner")
-      .eq("id", id)
-      .maybeSingle();
+app.delete(
+  "/admin/usuarios/:id",
+  requireAdmin,
+  requireOwner,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
 
-    if (alvoError) throw alvoError;
-    if (alvo?.is_owner) {
-      return res.status(403).json({ erro: "Nao e possivel alterar o dono." });
+      const { data: alvo, error: alvoError } = await supabase
+        .from("admins")
+        .select("usuario, is_owner")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (alvoError) throw alvoError;
+      if (alvo?.is_owner) {
+        return res.status(403).json({ erro: "Nao e possivel remover o dono." });
+      }
+
+      const { error } = await supabase.from("admins").delete().eq("id", id);
+      if (error) throw error;
+
+      await registrarLog({
+        acao: "admin_removido",
+        admin: req.admin.usuario,
+        detalhes: `Usuario ${alvo?.usuario || id} removido.`,
+      });
+      res.json({ sucesso: true });
+    } catch (err) {
+      console.error("Erro admin/usuarios delete:", err.message);
+      res.status(500).json({ erro: "Erro ao remover usuario." });
     }
-
-    const { error } = await supabase.from("admins").update({ status }).eq("id", id);
-    if (error) throw error;
-
-    await registrarLog({ acao: `admin_${acao}`, admin: req.admin.usuario, detalhes: `Usuario ${alvo?.usuario || id} atualizado para ${status}.` });
-    res.json({ sucesso: true });
-  } catch (err) {
-    console.error("Erro admin/usuarios acao:", err.message);
-    res.status(500).json({ erro: "Erro ao atualizar usuario." });
-  }
-});
-
-app.delete("/admin/usuarios/:id", requireAdmin, requireOwner, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { data: alvo, error: alvoError } = await supabase
-      .from("admins")
-      .select("usuario, is_owner")
-      .eq("id", id)
-      .maybeSingle();
-
-    if (alvoError) throw alvoError;
-    if (alvo?.is_owner) {
-      return res.status(403).json({ erro: "Nao e possivel remover o dono." });
-    }
-
-    const { error } = await supabase.from("admins").delete().eq("id", id);
-    if (error) throw error;
-
-    await registrarLog({ acao: "admin_removido", admin: req.admin.usuario, detalhes: `Usuario ${alvo?.usuario || id} removido.` });
-    res.json({ sucesso: true });
-  } catch (err) {
-    console.error("Erro admin/usuarios delete:", err.message);
-    res.status(500).json({ erro: "Erro ao remover usuario." });
-  }
-});
+  },
+);
 
 app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
   try {
     const nome = String(req.body?.nome || "").trim();
-    const usuario = String(req.body?.usuario || "").trim().toLowerCase();
+    const usuario = String(req.body?.usuario || "")
+      .trim()
+      .toLowerCase();
     const senha = String(req.body?.senha || "");
     if (!nome || !usuario || !senha) {
       return res.status(400).json({ erro: "Preencha nome, usuario e senha." });
     }
 
     if (senha.length < 6) {
-      return res.status(400).json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
+      return res
+        .status(400)
+        .json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
     }
 
     const salt = crypto.randomBytes(16).toString("hex");
@@ -434,14 +797,16 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
         salt,
         status: "ativo",
         is_owner: false,
-        curso_lider: "todos"
+        curso_lider: "todos",
       })
       .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
       .single();
 
     if (error) {
       if (error.code === "23505") {
-        return res.status(409).json({ erro: "Este usuario ja esta cadastrado." });
+        return res
+          .status(409)
+          .json({ erro: "Este usuario ja esta cadastrado." });
       }
       throw error;
     }
@@ -449,7 +814,7 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
     await registrarLog({
       acao: "curso_lider_criado",
       admin: req.admin.usuario,
-      detalhes: `${usuario} criado como lider de todos os cursos.`
+      detalhes: `${usuario} criado como lider de todos os cursos.`,
     });
 
     res.json({ sucesso: true, admin: publicAdmin(data) });
@@ -459,124 +824,171 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
   }
 });
 
-app.patch("/admin/lideres/:id", requireAdmin, requireOwner, async (req, res) => {
-  try {
-    const curso = req.body?.curso === "todos" ? "todos" : "";
+app.patch(
+  "/admin/lideres/:id",
+  requireAdmin,
+  requireOwner,
+  async (req, res) => {
+    try {
+      const curso = req.body?.curso === "todos" ? "todos" : "";
 
-    const { data: alvo, error: alvoError } = await supabase
-      .from("admins")
-      .select("usuario, is_owner")
-      .eq("id", req.params.id)
-      .maybeSingle();
+      const { data: alvo, error: alvoError } = await supabase
+        .from("admins")
+        .select("usuario, is_owner")
+        .eq("id", req.params.id)
+        .maybeSingle();
 
-    if (alvoError) throw alvoError;
-    if (!alvo) return res.status(404).json({ erro: "Usuario nao encontrado." });
-    if (alvo.is_owner) return res.status(403).json({ erro: "O dono ja possui acesso a todos os cursos." });
+      if (alvoError) throw alvoError;
+      if (!alvo)
+        return res.status(404).json({ erro: "Usuario nao encontrado." });
+      if (alvo.is_owner)
+        return res
+          .status(403)
+          .json({ erro: "O dono ja possui acesso a todos os cursos." });
 
-    const { error } = await supabase
-      .from("admins")
-      .update({ curso_lider: curso || null })
-      .eq("id", req.params.id);
+      const { error } = await supabase
+        .from("admins")
+        .update({ curso_lider: curso || null })
+        .eq("id", req.params.id);
 
-    if (error) throw error;
+      if (error) throw error;
 
-    await registrarLog({
-      acao: curso ? "curso_lider_definido" : "curso_lider_removido",
-      admin: req.admin.usuario,
-      detalhes: curso ? `${alvo.usuario} autorizado para todos os cursos.` : `Lideranca de ${alvo.usuario} removida.`
-    });
+      await registrarLog({
+        acao: curso ? "curso_lider_definido" : "curso_lider_removido",
+        admin: req.admin.usuario,
+        detalhes: curso
+          ? `${alvo.usuario} autorizado para todos os cursos.`
+          : `Lideranca de ${alvo.usuario} removida.`,
+      });
 
-    res.json({ sucesso: true, curso_lider: curso });
-  } catch (err) {
-    console.error("Erro curso-lider:", err.message);
-    res.status(500).json({ erro: "Erro ao atualizar lider de curso." });
-  }
-});
+      res.json({ sucesso: true, curso_lider: curso });
+    } catch (err) {
+      console.error("Erro curso-lider:", err.message);
+      res.status(500).json({ erro: "Erro ao atualizar lider de curso." });
+    }
+  },
+);
 
 app.get("/cursos", (req, res) => {
-  res.json(Object.entries(COURSE_CATALOG).map(([codigo, curso]) => ({ codigo, nome: curso.nome })));
+  res.json(
+    Object.entries(COURSE_CATALOG).map(([codigo, curso]) => ({
+      codigo,
+      nome: curso.nome,
+    })),
+  );
 });
 
-app.get("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) => {
-  try {
-    let query = supabase
-      .from("acessos_cursos")
-      .select("id, created_at, discord_id, curso, liberado_por, expires_at, revoked_at")
-      .is("revoked_at", null)
-      .gt("expires_at", new Date().toISOString())
-      .order("expires_at", { ascending: true });
+app.get(
+  "/cursos/acessos",
+  requireAdmin,
+  requireCourseLeader,
+  async (req, res) => {
+    try {
+      let query = supabase
+        .from("acessos_cursos")
+        .select(
+          "id, created_at, discord_id, curso, liberado_por, expires_at, revoked_at",
+        )
+        .is("revoked_at", null)
+        .gt("expires_at", new Date().toISOString())
+        .order("expires_at", { ascending: true });
 
-    const { data, error } = await query;
-    if (error) throw error;
-    res.json(data || []);
-  } catch (err) {
-    console.error("Erro ao listar acessos de cursos:", err.message);
-    res.status(500).json({ erro: "Erro ao listar acessos de cursos." });
-  }
-});
-
-app.post("/cursos/acessos", requireAdmin, requireCourseLeader, async (req, res) => {
-  try {
-    const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
-    const curso = normalizeCourse(req.body?.curso);
-
-    if (!/^\d+$/.test(discordId)) {
-      return res.status(400).json({ erro: "Informe um ID do Discord valido, somente com numeros." });
+      const { data, error } = await query;
+      if (error) throw error;
+      res.json(data || []);
+    } catch (err) {
+      console.error("Erro ao listar acessos de cursos:", err.message);
+      res.status(500).json({ erro: "Erro ao listar acessos de cursos." });
     }
-    if (!curso) return res.status(400).json({ erro: "Selecione um curso valido." });
+  },
+);
 
-    await supabase
-      .from("acessos_cursos")
-      .update({ revoked_at: new Date().toISOString() })
-      .eq("discord_id", discordId)
-      .eq("curso", curso)
-      .is("revoked_at", null);
+app.post(
+  "/cursos/acessos",
+  requireAdmin,
+  requireCourseLeader,
+  async (req, res) => {
+    try {
+      const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
 
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const { data, error } = await supabase
-      .from("acessos_cursos")
-      .insert({
+      if (!/^\d+$/.test(discordId)) {
+        return res.status(400).json({
+          erro: "Informe um ID do Discord valido, somente com numeros.",
+        });
+      }
+
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const cursos = Object.keys(COURSE_CATALOG);
+
+      await supabase
+        .from("acessos_cursos")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("discord_id", discordId)
+        .is("revoked_at", null);
+
+      const registros = cursos.map((curso) => ({
         discord_id: discordId,
         curso,
         liberado_por: req.admin.usuario,
-        expires_at: expiresAt
-      })
-      .select("id, discord_id, curso, liberado_por, expires_at")
-      .single();
+        expires_at: expiresAt,
+      }));
 
-    if (error) throw error;
+      const { data, error } = await supabase
+        .from("acessos_cursos")
+        .insert(registros)
+        .select("id, discord_id, curso, liberado_por, expires_at");
 
-    await registrarLog({ acao: "curso_acesso_liberado", admin: req.admin.usuario, discord_id: discordId, detalhes: `${curso} liberado por 60 minutos.` });
-    res.json({ sucesso: true, acesso: data });
-  } catch (err) {
-    console.error("Erro ao liberar curso:", err.message);
-    res.status(500).json({ erro: "Erro ao liberar acesso ao curso." });
-  }
-});
+      if (error) throw error;
 
-app.delete("/cursos/acessos/:id", requireAdmin, requireCourseLeader, async (req, res) => {
-  try {
-    const { data: acesso, error: findError } = await supabase
-      .from("acessos_cursos")
-      .select("id, discord_id, curso")
-      .eq("id", req.params.id)
-      .maybeSingle();
+      await registrarLog({
+        acao: "curso_acesso_liberado",
+        admin: req.admin.usuario,
+        discord_id: discordId,
+        detalhes: "Todos os cursos liberados por 60 minutos.",
+      });
+      res.json({ sucesso: true, acessos: data || [], expires_at: expiresAt });
+    } catch (err) {
+      console.error("Erro ao liberar curso:", err.message);
+      res.status(500).json({ erro: "Erro ao liberar acesso ao curso." });
+    }
+  },
+);
 
-    if (findError) throw findError;
-    if (!acesso) return res.status(404).json({ erro: "Acesso nao encontrado." });
-    const { error } = await supabase
-      .from("acessos_cursos")
-      .update({ revoked_at: new Date().toISOString() })
-      .eq("id", req.params.id);
+app.delete(
+  "/cursos/acessos/:id",
+  requireAdmin,
+  requireCourseLeader,
+  async (req, res) => {
+    try {
+      const { data: acesso, error: findError } = await supabase
+        .from("acessos_cursos")
+        .select("id, discord_id, curso")
+        .eq("id", req.params.id)
+        .maybeSingle();
 
-    if (error) throw error;
-    await registrarLog({ acao: "curso_acesso_revogado", admin: req.admin.usuario, discord_id: acesso.discord_id, detalhes: `${acesso.curso} revogado.` });
-    res.json({ sucesso: true });
-  } catch (err) {
-    console.error("Erro ao revogar curso:", err.message);
-    res.status(500).json({ erro: "Erro ao revogar acesso ao curso." });
-  }
-});
+      if (findError) throw findError;
+      if (!acesso)
+        return res.status(404).json({ erro: "Acesso nao encontrado." });
+      const { error } = await supabase
+        .from("acessos_cursos")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("discord_id", acesso.discord_id)
+        .is("revoked_at", null);
+
+      if (error) throw error;
+      await registrarLog({
+        acao: "curso_acesso_revogado",
+        admin: req.admin.usuario,
+        discord_id: acesso.discord_id,
+        detalhes: "Todos os cursos revogados.",
+      });
+      res.json({ sucesso: true });
+    } catch (err) {
+      console.error("Erro ao revogar curso:", err.message);
+      res.status(500).json({ erro: "Erro ao revogar acesso ao curso." });
+    }
+  },
+);
 
 app.post("/cursos/validar", async (req, res) => {
   try {
@@ -599,13 +1011,24 @@ app.post("/cursos/validar", async (req, res) => {
       .maybeSingle();
 
     if (error) throw error;
-    if (!acesso) return res.status(403).json({ erro: "Este ID nao possui acesso ativo para o curso selecionado." });
+    if (!acesso)
+      return res.status(403).json({
+        erro: "Este ID nao possui acesso ativo para o curso selecionado.",
+      });
 
     const courseData = COURSE_CATALOG[curso];
     let documentUrl = courseData.externalUrl || "";
 
     if (courseData.storagePath) {
-      const secondsRemaining = Math.max(1, Math.min(3600, Math.floor((new Date(acesso.expires_at).getTime() - Date.now()) / 1000)));
+      const secondsRemaining = Math.max(
+        1,
+        Math.min(
+          3600,
+          Math.floor(
+            (new Date(acesso.expires_at).getTime() - Date.now()) / 1000,
+          ),
+        ),
+      );
       const { data: signed, error: signedError } = await supabase.storage
         .from("cursos")
         .createSignedUrl(courseData.storagePath, secondsRemaining);
@@ -618,7 +1041,7 @@ app.post("/cursos/validar", async (req, res) => {
       sucesso: true,
       curso: { codigo: curso, nome: courseData.nome },
       expires_at: acesso.expires_at,
-      document_url: documentUrl
+      document_url: documentUrl,
     });
   } catch (err) {
     console.error("Erro ao validar curso:", err.message);
@@ -648,7 +1071,10 @@ app.get("/manutencao", async (req, res) => {
       detalhes = {};
     }
 
-    res.json({ ativo: Boolean(detalhes.ativo), atualizado_em: data?.created_at || null });
+    res.json({
+      ativo: Boolean(detalhes.ativo),
+      atualizado_em: data?.created_at || null,
+    });
   } catch (err) {
     console.error("Erro manutencao:", err);
     res.json({ ativo: false });
@@ -660,13 +1086,15 @@ app.patch("/manutencao", async (req, res) => {
     const ativo = Boolean(req.body?.ativo);
     const admin = req.body?.admin || "presid";
     if (admin !== "presid") {
-      return res.status(403).json({ erro: "Somente o dono pode alterar a manutencao" });
+      return res
+        .status(403)
+        .json({ erro: "Somente o dono pode alterar a manutencao" });
     }
 
     await registrarLog({
       acao: "manutencao_site",
       admin,
-      detalhes: JSON.stringify({ ativo })
+      detalhes: JSON.stringify({ ativo }),
     });
 
     res.json({ sucesso: true, ativo });
@@ -676,38 +1104,72 @@ app.patch("/manutencao", async (req, res) => {
   }
 });
 
-app.post("/solicitar-salario", async (req, res) => {
+app.post("/solicitar-salario", requireMember, async (req, res) => {
   try {
-    const { nome, id, discord_id, discord_mention_id, cargo, valor_solicitado, valor_bruto, taxa_financeiro, tipo_pagamento, dia, horario, turno, observacao } = req.body;
+    const {
+      cargo,
+      valor_solicitado,
+      valor_bruto,
+      taxa_financeiro,
+      tipo_pagamento,
+      dia,
+      horario,
+      turno,
+      observacao,
+    } = req.body;
+    const nome = req.member.nome;
+    const id = req.member.discord_id;
+    const discord_id = req.member.discord_id;
+    const discord_mention_id = req.member.discord_id;
 
     if (!nome || !discord_id || !cargo || valor_solicitado === undefined) {
-      return res.status(400).json({ erro: "Campos obrigatorios: nome, discord_id, cargo, valor_solicitado" });
+      return res.status(400).json({
+        erro: "Campos obrigatorios: nome, discord_id, cargo, valor_solicitado",
+      });
     }
 
-    const tipoPagamento = String(tipo_pagamento || "salario").trim().toLowerCase();
+    const tipoPagamento = String(tipo_pagamento || "salario")
+      .trim()
+      .toLowerCase();
     const tipoPagamentoLabel = formatTipoPagamento(tipoPagamento);
     const valorSolicitado = toInt(valor_solicitado);
-    const valorBruto = valor_bruto !== undefined ? toInt(valor_bruto) : valorSolicitado;
-    const taxaFinanceiro = taxa_financeiro !== undefined ? toInt(taxa_financeiro) : Math.round(valorSolicitado * 0.10);
+    const valorBruto =
+      valor_bruto !== undefined ? toInt(valor_bruto) : valorSolicitado;
+    const taxaFinanceiro =
+      taxa_financeiro !== undefined
+        ? toInt(taxa_financeiro)
+        : Math.round(valorSolicitado * 0.1);
     const valorAposTaxa = Math.max(valorSolicitado - taxaFinanceiro, 0);
 
     if (tipoPagamento === "ambos") {
       const semana = getCurrentWeekRange();
-      const { data: pagamentosSemana, error: pagamentosSemanaError } = await supabase
-        .from("pagamentos")
-        .select("id, observacao, created_at")
-        .eq("discord_id", String(discord_id))
-        .eq("metodo", "salario")
-        .gte("created_at", semana.start)
-        .lt("created_at", semana.end);
+      const { data: pagamentosSemana, error: pagamentosSemanaError } =
+        await supabase
+          .from("pagamentos")
+          .select("id, observacao, created_at")
+          .eq("discord_id", String(discord_id))
+          .eq("metodo", "salario")
+          .gte("created_at", semana.start)
+          .lt("created_at", semana.end);
 
       if (pagamentosSemanaError) {
-        console.error("Erro ao verificar pagamentos da semana:", pagamentosSemanaError);
-        return res.status(500).json({ erro: "Erro ao verificar pagamentos da semana" });
+        console.error(
+          "Erro ao verificar pagamentos da semana:",
+          pagamentosSemanaError,
+        );
+        return res
+          .status(500)
+          .json({ erro: "Erro ao verificar pagamentos da semana" });
       }
 
-      if ((pagamentosSemana || []).some(p => hasNormalSalaryInObservation(p.observacao))) {
-        return res.status(400).json({ erro: "Este ID ja solicitou salario normal nesta semana. Solicite apenas o salario de setor." });
+      if (
+        (pagamentosSemana || []).some((p) =>
+          hasNormalSalaryInObservation(p.observacao),
+        )
+      ) {
+        return res.status(400).json({
+          erro: "Este ID ja solicitou salario normal nesta semana. Solicite apenas o salario de setor.",
+        });
       }
     }
 
@@ -735,11 +1197,17 @@ app.post("/solicitar-salario", async (req, res) => {
         valor_original: valorOriginal,
         valor_abatido: valorAbatido,
         valor_restante: valorRestante,
-        status_final: valorRestante > 0 ? "pendente" : "paga"
+        status_final: valorRestante > 0 ? "pendente" : "paga",
       };
     });
-    const valorDescontado = multasProcessadas.reduce((total, multa) => total + multa.valor_abatido, 0);
-    const valorPendenteMultas = multasProcessadas.reduce((total, multa) => total + multa.valor_restante, 0);
+    const valorDescontado = multasProcessadas.reduce(
+      (total, multa) => total + multa.valor_abatido,
+      0,
+    );
+    const valorPendenteMultas = multasProcessadas.reduce(
+      (total, multa) => total + multa.valor_restante,
+      0,
+    );
     const valorPago = Math.max(valorAposTaxa - valorDescontado, 0);
 
     const { data: pagamento, error: pagamentoError } = await supabase
@@ -752,8 +1220,9 @@ app.post("/solicitar-salario", async (req, res) => {
         valor_pago: valorPago,
         metodo: "salario",
         registrado_por: "site",
-        observacao: observacao || `Tipo de salario: ${tipoPagamento} | Cargo: ${cargo}`,
-        status: "pendente"
+        observacao:
+          observacao || `Tipo de salario: ${tipoPagamento} | Cargo: ${cargo}`,
+        status: "pendente",
       })
       .select()
       .single();
@@ -770,12 +1239,15 @@ app.post("/solicitar-salario", async (req, res) => {
         .from("multas")
         .update({
           valor: multa.valor_restante,
-          status: multa.status_final
+          status: multa.status_final,
         })
         .eq("id", multa.id);
 
       if (updateMultaError) {
-        console.error(`Erro ao atualizar multa #${multa.id}:`, updateMultaError);
+        console.error(
+          `Erro ao atualizar multa #${multa.id}:`,
+          updateMultaError,
+        );
       }
     }
 
@@ -783,16 +1255,22 @@ app.post("/solicitar-salario", async (req, res) => {
       acao: "solicitacao_salario",
       admin: "site",
       discord_id,
-      detalhes: `${nome} solicitou ${formatCurrency(valorSolicitado)}. Multas descontadas: ${formatCurrency(valorDescontado)}. Multas restantes: ${formatCurrency(valorPendenteMultas)}. Valor final: ${formatCurrency(valorPago)}.`
+      detalhes: `${nome} solicitou ${formatCurrency(valorSolicitado)}. Multas descontadas: ${formatCurrency(valorDescontado)}. Multas restantes: ${formatCurrency(valorPendenteMultas)}. Valor final: ${formatCurrency(valorPago)}.`,
     });
 
     if (DISCORD_WEBHOOK_SALARIOS) {
-      const mention = discord_mention_id && /^\d{5,}$/.test(String(discord_mention_id)) ? `<@${discord_mention_id}>` : nome;
+      const mention =
+        discord_mention_id && /^\d{5,}$/.test(String(discord_mention_id))
+          ? `<@${discord_mention_id}>`
+          : nome;
       const detalhesMultas = multasProcessadas
-        .map(m => {
+        .map((m) => {
           const motivo = m.motivo || "Sem motivo";
           const obs = m.observacao ? ` | Obs: ${m.observacao}` : "";
-          const restante = m.valor_restante > 0 ? ` | Restante pendente: ${formatCurrency(m.valor_restante)}` : " | Quitada";
+          const restante =
+            m.valor_restante > 0
+              ? ` | Restante pendente: ${formatCurrency(m.valor_restante)}`
+              : " | Quitada";
           return `- #${m.id} - Abatido: ${formatCurrency(m.valor_abatido)} de ${formatCurrency(m.valor_original)} - ${motivo}${obs}${restante}`;
         })
         .join("\n");
@@ -811,9 +1289,13 @@ app.post("/solicitar-salario", async (req, res) => {
         `Valor solicitado: **${formatCurrency(valorSolicitado)}**\n` +
         `Taxa Financeiro (-10%): **-${formatCurrency(taxaFinanceiro)}**\n` +
         `Multas descontadas: **-${formatCurrency(valorDescontado)}**\n` +
-        (valorPendenteMultas > 0 ? `Restante de multas pendentes: **${formatCurrency(valorPendenteMultas)}**\n` : "") +
+        (valorPendenteMultas > 0
+          ? `Restante de multas pendentes: **${formatCurrency(valorPendenteMultas)}**\n`
+          : "") +
         `Valor final a pagar: **${formatCurrency(valorPago)}**\n\n` +
-        (detalhesMultas ? `**MULTAS DESCONTADAS:**\n${detalhesMultas}\n\n` : "") +
+        (detalhesMultas
+          ? `**MULTAS DESCONTADAS:**\n${detalhesMultas}\n\n`
+          : "") +
         `>>> **ORIENTACOES AO MEMBRO DO FINANCEIRO:**\n\n` +
         `• Conferir multas antes de aprovar o pagamento, caso o pagamento possui algum tipo de multa e será negado, informar a presidência.\n` +
         `• Membros acima de Médico-Chefe possuem obrigação de estar com a meta financeira semanal em dia no valor de R$500.000\n` +
@@ -824,11 +1306,19 @@ app.post("/solicitar-salario", async (req, res) => {
       await fetch(DISCORD_WEBHOOK_SALARIOS, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: messageContent })
+        body: JSON.stringify({ content: messageContent }),
       });
     }
 
-    res.json({ sucesso: true, pagamento, valor_solicitado: valorSolicitado, valor_descontado: valorDescontado, valor_pago: valorPago, valor_pendente_multas: valorPendenteMultas, multas: multasProcessadas });
+    res.json({
+      sucesso: true,
+      pagamento,
+      valor_solicitado: valorSolicitado,
+      valor_descontado: valorDescontado,
+      valor_pago: valorPago,
+      valor_pendente_multas: valorPendenteMultas,
+      multas: multasProcessadas,
+    });
   } catch (err) {
     console.error("Erro solicitar salario:", err);
     res.status(500).json({ erro: "Erro ao solicitar salario" });
@@ -837,10 +1327,13 @@ app.post("/solicitar-salario", async (req, res) => {
 
 app.post("/multas", async (req, res) => {
   try {
-    const { discord_id, nome, valor, motivo, observacao, aplicada_por } = req.body;
+    const { discord_id, nome, valor, motivo, observacao, aplicada_por } =
+      req.body;
 
     if (!discord_id || !valor) {
-      return res.status(400).json({ erro: "Campos obrigatorios: discord_id e valor" });
+      return res
+        .status(400)
+        .json({ erro: "Campos obrigatorios: discord_id e valor" });
     }
 
     const { data, error } = await supabase
@@ -852,7 +1345,7 @@ app.post("/multas", async (req, res) => {
         motivo: motivo || "",
         observacao: observacao || "",
         aplicada_por: aplicada_por || "admin",
-        status: "pendente"
+        status: "pendente",
       })
       .select()
       .single();
@@ -866,7 +1359,7 @@ app.post("/multas", async (req, res) => {
       acao: "multa_criada",
       admin: aplicada_por || "admin",
       discord_id,
-      detalhes: `Multa de ${formatCurrency(valor)} criada. Motivo: ${motivo || "sem motivo"}`
+      detalhes: `Multa de ${formatCurrency(valor)} criada. Motivo: ${motivo || "sem motivo"}`,
     });
 
     res.json({ sucesso: true, multa: data });
@@ -933,7 +1426,15 @@ app.get("/multas/:discord_id", async (req, res) => {
 app.patch("/multas/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { discord_id, nome, valor, motivo, observacao, aplicada_por, status } = req.body;
+    const {
+      discord_id,
+      nome,
+      valor,
+      motivo,
+      observacao,
+      aplicada_por,
+      status,
+    } = req.body;
 
     const update = {};
     if (discord_id !== undefined) update.discord_id = String(discord_id);
@@ -960,7 +1461,7 @@ app.patch("/multas/:id", async (req, res) => {
       acao: "multa_editada",
       admin: aplicada_por || "admin",
       discord_id: data.discord_id,
-      detalhes: `Multa #${id} editada.`
+      detalhes: `Multa #${id} editada.`,
     });
 
     res.json({ sucesso: true, multa: data });
@@ -987,7 +1488,12 @@ app.patch("/multas/:id/cancelar", async (req, res) => {
       return res.status(500).json({ erro: "Erro ao cancelar multa" });
     }
 
-    await registrarLog({ acao: "multa_cancelada", admin: admin || "admin", discord_id: data.discord_id, detalhes: `Multa #${id} cancelada.` });
+    await registrarLog({
+      acao: "multa_cancelada",
+      admin: admin || "admin",
+      discord_id: data.discord_id,
+      detalhes: `Multa #${id} cancelada.`,
+    });
     res.json({ sucesso: true, multa: data });
   } catch (err) {
     console.error("Erro cancelar multa:", err);
@@ -1017,7 +1523,12 @@ app.delete("/multas/:id", async (req, res) => {
       return res.status(500).json({ erro: "Erro ao remover multa" });
     }
 
-    await registrarLog({ acao: "multa_removida", admin: "presid", discord_id: multa.discord_id, detalhes: `Multa #${id} removida definitivamente.` });
+    await registrarLog({
+      acao: "multa_removida",
+      admin: "presid",
+      discord_id: multa.discord_id,
+      detalhes: `Multa #${id} removida definitivamente.`,
+    });
     res.json({ sucesso: true });
   } catch (err) {
     console.error("Erro remover multa:", err);
@@ -1029,9 +1540,11 @@ app.get("/patrulhamento", async (req, res) => {
   try {
     const guild = await getGuild();
     await guild.channels.fetch();
-    const canais = guild.channels.cache.filter(c => c.parentId === CATEGORIA_PTR && c.type === ChannelType.GuildVoice);
+    const canais = guild.channels.cache.filter(
+      (c) => c.parentId === CATEGORIA_PTR && c.type === ChannelType.GuildVoice,
+    );
     let total = 0;
-    canais.forEach(c => total += c.members.size);
+    canais.forEach((c) => (total += c.members.size));
     res.json({ total });
   } catch (err) {
     console.error("Erro PTR:", err.message);
@@ -1042,14 +1555,21 @@ app.get("/patrulhamento", async (req, res) => {
 app.get("/contador", async (req, res) => {
   try {
     const guild = await getGuild();
-    const role = guild.roles.cache.get(CARGO_SAMU) || await guild.roles.fetch(CARGO_SAMU);
+    const role =
+      guild.roles.cache.get(CARGO_SAMU) ||
+      (await guild.roles.fetch(CARGO_SAMU));
 
     if (!role) return res.json({ total: 0, online: 0 });
 
     let onlineCount = 0;
-    guild.presences.cache.forEach(presence => {
+    guild.presences.cache.forEach((presence) => {
       const member = guild.members.cache.get(presence.userId);
-      if (member && member.roles.cache.has(CARGO_SAMU) && ["online", "idle", "dnd"].includes(presence.status)) onlineCount++;
+      if (
+        member &&
+        member.roles.cache.has(CARGO_SAMU) &&
+        ["online", "idle", "dnd"].includes(presence.status)
+      )
+        onlineCount++;
     });
 
     res.json({ total: role.members.size, online: onlineCount });
@@ -1066,24 +1586,24 @@ app.get("/membros", async (req, res) => {
       "Funcionario da Semana": ROLE_FUNCIONARIO_SEMANA,
       "Recrutador Destaque": ROLE_RECRUTADOR_DESTAQUE,
       "Professor Destaque": ROLE_PROFESSOR_DESTAQUE,
-      "Presidente": ROLE_PRESIDENTE,
+      Presidente: ROLE_PRESIDENTE,
       "Vice-Presidente": ROLE_VICE,
-      "Corregedoria": ROLE_CORREGEDORIA
+      Corregedoria: ROLE_CORREGEDORIA,
     };
     const resultado = {};
 
     for (const [nome, id] of Object.entries(cargos)) {
-      const role = guild.roles.cache.get(id) || await guild.roles.fetch(id);
+      const role = guild.roles.cache.get(id) || (await guild.roles.fetch(id));
       if (!role) {
         resultado[nome] = [];
         continue;
       }
-      resultado[nome] = role.members.map(member => ({
+      resultado[nome] = role.members.map((member) => ({
         id: member.user.id,
         nome: member.displayName,
         username: member.user.username,
         avatar: member.user.displayAvatarURL({ size: 256 }),
-        status: member.presence?.status || "offline"
+        status: member.presence?.status || "offline",
       }));
     }
 
@@ -1100,11 +1620,11 @@ app.get("/publicacoes", async (req, res) => {
     await guild.roles.fetch();
     const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
     const mensagens = await canal.messages.fetch({ limit: 2 });
-    const lista = mensagens.map(m => ({
+    const lista = mensagens.map((m) => ({
       autor: m.author.username,
       avatar: m.author.displayAvatarURL(),
       conteudo: substituirMencoesDeCargo(m.content, guild),
-      data: m.createdAt.toLocaleString("pt-BR")
+      data: m.createdAt.toLocaleString("pt-BR"),
     }));
     res.json(lista);
   } catch (err) {
