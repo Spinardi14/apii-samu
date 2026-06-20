@@ -531,6 +531,14 @@ app.post("/portal/compras-cargos", requireMember, async (req, res) => {
       .select("id, created_at")
       .single();
     if (error) throw error;
+
+    const { data: pagamentos, error: pagamentosError } = await supabase
+      .from("pagamentos")
+      .select("valor_pago")
+      .eq("metodo", "salario")
+      .gte("created_at", semana.start)
+      .lte("created_at", semana.end);
+    if (pagamentosError) throw pagamentosError;
     res.json({ sucesso: true, compra: data });
   } catch (err) {
     console.error("Erro ao registrar compra de cargo:", err.message);
@@ -560,6 +568,10 @@ app.get("/transparencia/cargos", async (req, res) => {
     res.json({
       semana: `${semana.inicio} a ${semana.fim}`,
       fechamento: semana.fechamento,
+      salarios_pagos: (pagamentos || []).reduce(
+        (total, pagamento) => total + Number(pagamento.valor_pago || 0),
+        0,
+      ),
       ...totais,
     });
   } catch (err) {
