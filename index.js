@@ -551,7 +551,7 @@ app.get("/transparencia/cargos", async (req, res) => {
 
     const { data: pagamentos, error: pagamentosError } = await supabase
       .from("pagamentos")
-      .select("valor_pago")
+      .select("valor_solicitado")
       .eq("metodo", "salario")
       .gte("created_at", semana.start)
       .lte("created_at", semana.end);
@@ -570,7 +570,8 @@ app.get("/transparencia/cargos", async (req, res) => {
       semana: `${semana.inicio} a ${semana.fim}`,
       fechamento: semana.fechamento,
       salarios_pagos: (pagamentos || []).reduce(
-        (total, pagamento) => total + Number(pagamento.valor_pago || 0),
+        (total, pagamento) =>
+          total + Number(pagamento.valor_solicitado || 0),
         0,
       ),
       ...totais,
