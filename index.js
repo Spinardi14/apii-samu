@@ -893,7 +893,24 @@ app.delete(
   },
 );
 
-app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
+app.get("/admin/lideres", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("admins")
+      .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
+      .eq("status", "ativo")
+      .eq("curso_lider", "todos")
+      .order("usuario", { ascending: true });
+
+    if (error) throw error;
+    res.json((data || []).map(publicAdmin));
+  } catch (err) {
+    console.error("Erro ao listar lideres de curso:", err.message);
+    res.status(500).json({ erro: "Erro ao listar lideres de curso." });
+  }
+});
+
+app.post("/admin/lideres", requireAdmin, async (req, res) => {
   try {
     const usuario = String(req.body?.usuario || "")
       .trim()
@@ -908,6 +925,38 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
       return res
         .status(400)
         .json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
+    }
+
+    const { data: existente, error: existenteError } = await supabase
+      .from("admins")
+      .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
+      .eq("usuario", usuario)
+      .maybeSingle();
+
+    if (existenteError) throw existenteError;
+    if (existente?.is_owner) {
+      return res
+        .status(403)
+        .json({ erro: "O dono ja possui acesso a todos os cursos." });
+    }
+
+    if (existente) {
+      const { data: atualizado, error: atualizarError } = await supabase
+        .from("admins")
+        .update({ status: "ativo", curso_lider: "todos" })
+        .eq("id", existente.id)
+        .select("id, created_at, usuario, nome, status, is_owner, curso_lider")
+        .single();
+
+      if (atualizarError) throw atualizarError;
+
+      await registrarLog({
+        acao: "curso_lider_definido",
+        admin: req.admin.usuario,
+        detalhes: `${usuario} autorizado como lider de todos os cursos.`,
+      });
+
+      return res.json({ sucesso: true, admin: publicAdmin(atualizado) });
     }
 
     const salt = crypto.randomBytes(16).toString("hex");
@@ -951,7 +1000,6 @@ app.post("/admin/lideres", requireAdmin, requireOwner, async (req, res) => {
 app.patch(
   "/admin/lideres/:id",
   requireAdmin,
-  requireOwner,
   async (req, res) => {
     try {
       const curso = req.body?.curso === "todos" ? "todos" : "";
