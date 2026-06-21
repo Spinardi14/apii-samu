@@ -8,7 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "12mb" }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -309,6 +309,17 @@ function normalizeCourse(value) {
     .trim()
     .toLowerCase();
   return COURSE_CATALOG[course] ? course : "";
+}
+
+function sanitizeCourseHtml(value) {
+  return String(value || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<(iframe|object|embed|form|input|button)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(iframe|object|embed|form|input|button)([^>]*)\/?>/gi, "")
+    .replace(/\son\w+\s*=\s*(["']).*?\1/gi, "")
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, "")
+    .replace(/javascript:/gi, "");
 }
 
 async function findActiveCourseAccess(discordId, course) {
@@ -1131,7 +1142,9 @@ app.put("/admin/cursos/:curso/config", requireAdmin, async (req, res) => {
     const payload = {
       curso,
       titulo_documento: String(req.body?.titulo_documento || "").trim(),
-      conteudo_documento: String(req.body?.conteudo_documento || "").trim(),
+      conteudo_documento: sanitizeCourseHtml(
+        req.body?.conteudo_documento,
+      ).trim(),
       imagens,
       perguntas,
       atualizado_por: req.admin.usuario,
