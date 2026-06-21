@@ -31,6 +31,17 @@ const COURSE_WEBHOOKS = {
   desligamento: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
 };
 
+function normalizeDiscordWebhook(value) {
+  const webhook = String(value || "")
+    .trim()
+    .replace("https://discordapp.com/", "https://discord.com/");
+  return /^https:\/\/(www\.)?discord\.com\/api\/webhooks\/\d+\/[^?\s]+/i.test(
+    webhook,
+  )
+    ? webhook
+    : "";
+}
+
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
 if (!SUPABASE_SERVICE_ROLE_KEY)
   throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
@@ -327,6 +338,27 @@ async function findActiveCourseAccess(discordId, course) {
     .from("acessos_cursos")
     .select("id, discord_id, curso, expires_at")
     .eq("discord_id", String(discordId || ""))
+    .eq("curso", course)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .order("expires_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function findActiveMemberCourseAccess(member, course) {
+  const memberIds = [
+    String(member?.discord_id || "").trim(),
+    String(member?.ingame_id || "").trim(),
+  ].filter(Boolean);
+
+  const { data, error } = await supabase
+    .from("acessos_cursos")
+    .select("id, discord_id, curso, expires_at")
+    .in("discord_id", memberIds)
     .eq("curso", course)
     .is("revoked_at", null)
     .gt("expires_at", new Date().toISOString())
@@ -1381,7 +1413,7 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
     const curso = normalizeCourse(req.params.curso);
     if (!curso) return res.status(400).json({ erro: "Curso invalido." });
 
-    const acesso = await findActiveCourseAccess(req.member.discord_id, curso);
+    const acesso = await findActiveMemberCourseAccess(req.member, curso);
     if (!acesso) {
       return res.status(403).json({
         erro: "Seu acesso ao curso expirou. Solicite uma nova liberacao.",
@@ -1408,10 +1440,11 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
       }
     }
 
-    const webhook = COURSE_WEBHOOKS[curso];
+    const webhook = normalizeDiscordWebhook(COURSE_WEBHOOKS[curso]);
     if (!webhook) {
       return res.status(503).json({
-        erro: "O canal de respostas deste curso ainda nao foi configurado.",
+        erro:
+          "O webhook deste curso nao foi configurado corretamente no Render.",
       });
     }
 
@@ -1446,13 +1479,21 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
     if (remaining) chunks.push(remaining);
 
     for (const chunk of chunks) {
-      const discordResponse = await fetch(webhook, {
+      const webhookUrl = new URL(webhook);
+      webhookUrl.searchParams.set("wait", "true");
+      const discordResponse = await fetch(webhookUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "SAMU-Portal/1.0",
+        },
         body: JSON.stringify({ content: chunk }),
       });
       if (!discordResponse.ok) {
-        throw new Error(`Discord respondeu ${discordResponse.status}.`);
+        const discordError = await discordResponse.text();
+        throw new Error(
+          `Discord respondeu ${discordResponse.status}: ${discordError.slice(0, 300)}`,
+        );
       }
     }
 
@@ -1465,7 +1506,9 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
     res.json({ sucesso: true });
   } catch (err) {
     console.error("Erro ao enviar respostas do curso:", err.message);
-    res.status(500).json({ erro: "Erro ao enviar respostas do curso." });
+    res.status(500).json({
+      erro: `Erro ao enviar respostas do curso: ${err.message}`,
+    });
   }
 });
 
