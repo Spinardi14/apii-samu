@@ -21,6 +21,15 @@ const CHANNEL_PUBLICACOES = process.env.CHANNEL_PUBLICACOES;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DISCORD_WEBHOOK_SALARIOS = process.env.DISCORD_WEBHOOK_SALARIOS;
+const COURSE_WEBHOOKS = {
+  recrutadores: process.env.DISCORD_WEBHOOK_CURSO_RECRUTADORES,
+  professores: process.env.DISCORD_WEBHOOK_CURSO_PROFESSORES,
+  financeiro: process.env.DISCORD_WEBHOOK_CURSO_FINANCEIRO,
+  cfs: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
+  cfm: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
+  cig: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
+  desligamento: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
+};
 
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
 if (!SUPABASE_SERVICE_ROLE_KEY)
@@ -43,6 +52,7 @@ const COURSE_CATALOG = {
   financeiro: { nome: "Formacao Financeira", storagePath: "financeiro.pdf" },
   cfs: { nome: "CFS - Formacao para Socorristas", storagePath: "cfs.pdf" },
   cfm: { nome: "CFM - Formacao para Medicos", storagePath: "cfm.pdf" },
+  cig: { nome: "CIG - Curso de Instrucao Gestao", storagePath: "cig.pdf" },
   desligamento: {
     nome: "Responsavel por Desligamento / Advertencia",
     storagePath: "desligamento-advertencia.pdf",
@@ -299,6 +309,44 @@ function normalizeCourse(value) {
     .trim()
     .toLowerCase();
   return COURSE_CATALOG[course] ? course : "";
+}
+
+async function findActiveCourseAccess(discordId, course) {
+  const { data, error } = await supabase
+    .from("acessos_cursos")
+    .select("id, discord_id, curso, expires_at")
+    .eq("discord_id", String(discordId || ""))
+    .eq("curso", course)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .order("expires_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function getCourseConfig(course) {
+  const { data, error } = await supabase
+    .from("cursos_config")
+    .select(
+      "curso, titulo_documento, conteudo_documento, imagens, pdf_path, perguntas, updated_at",
+    )
+    .eq("curso", course)
+    .maybeSingle();
+
+  if (error && error.code !== "PGRST116") throw error;
+  return (
+    data || {
+      curso: course,
+      titulo_documento: "",
+      conteudo_documento: "",
+      imagens: [],
+      pdf_path: "",
+      perguntas: [],
+    }
+  );
 }
 
 async function registrarLog({
@@ -1051,6 +1099,103 @@ app.get("/cursos", (req, res) => {
   );
 });
 
+app.get("/admin/cursos/:curso/config", requireAdmin, async (req, res) => {
+  try {
+    const curso = normalizeCourse(req.params.curso);
+    if (!curso) return res.status(400).json({ erro: "Curso invalido." });
+    res.json({ sucesso: true, config: await getCourseConfig(curso) });
+  } catch (err) {
+    console.error("Erro ao carregar configuracao do curso:", err.message);
+    res.status(500).json({ erro: "Erro ao carregar configuracao do curso." });
+  }
+});
+
+app.put("/admin/cursos/:curso/config", requireAdmin, async (req, res) => {
+  try {
+    const curso = normalizeCourse(req.params.curso);
+    if (!curso) return res.status(400).json({ erro: "Curso invalido." });
+
+    const imagens = Array.isArray(req.body?.imagens)
+      ? req.body.imagens.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const perguntas = Array.isArray(req.body?.perguntas)
+      ? req.body.perguntas
+          .map((item, index) => ({
+            id: String(item?.id || `q${index + 1}`),
+            pergunta: String(item?.pergunta || "").trim(),
+            obrigatoria: item?.obrigatoria !== false,
+          }))
+          .filter((item) => item.pergunta)
+      : [];
+
+    const payload = {
+      curso,
+      titulo_documento: String(req.body?.titulo_documento || "").trim(),
+      conteudo_documento: String(req.body?.conteudo_documento || "").trim(),
+      imagens,
+      perguntas,
+      atualizado_por: req.admin.usuario,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from("cursos_config")
+      .upsert(payload, { onConflict: "curso" })
+      .select()
+      .single();
+    if (error) throw error;
+
+    await registrarLog({
+      acao: "curso_config_atualizada",
+      admin: req.admin.usuario,
+      detalhes: `Curso ${curso} atualizado.`,
+    });
+    res.json({ sucesso: true, config: data });
+  } catch (err) {
+    console.error("Erro ao salvar configuracao do curso:", err.message);
+    res.status(500).json({ erro: "Erro ao salvar configuracao do curso." });
+  }
+});
+
+app.put(
+  "/admin/cursos/:curso/pdf",
+  requireAdmin,
+  express.raw({ type: "application/pdf", limit: "25mb" }),
+  async (req, res) => {
+    try {
+      const curso = normalizeCourse(req.params.curso);
+      if (!curso) return res.status(400).json({ erro: "Curso invalido." });
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ erro: "Selecione um arquivo PDF." });
+      }
+
+      const path = `${curso}/${Date.now()}.pdf`;
+      const { error: uploadError } = await supabase.storage
+        .from("cursos")
+        .upload(path, req.body, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+      if (uploadError) throw uploadError;
+
+      const { error } = await supabase.from("cursos_config").upsert(
+        {
+          curso,
+          pdf_path: path,
+          atualizado_por: req.admin.usuario,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "curso" },
+      );
+      if (error) throw error;
+      res.json({ sucesso: true, pdf_path: path });
+    } catch (err) {
+      console.error("Erro ao enviar PDF do curso:", err.message);
+      res.status(500).json({ erro: "Erro ao enviar PDF do curso." });
+    }
+  },
+);
+
 app.get(
   "/cursos/acessos",
   requireAdmin,
@@ -1172,27 +1317,18 @@ app.post("/cursos/validar", async (req, res) => {
       return res.status(400).json({ erro: "ID ou curso invalido." });
     }
 
-    const { data: acesso, error } = await supabase
-      .from("acessos_cursos")
-      .select("id, discord_id, curso, expires_at")
-      .eq("discord_id", discordId)
-      .eq("curso", curso)
-      .is("revoked_at", null)
-      .gt("expires_at", new Date().toISOString())
-      .order("expires_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) throw error;
+    const acesso = await findActiveCourseAccess(discordId, curso);
     if (!acesso)
       return res.status(403).json({
         erro: "Este ID nao possui acesso ativo para o curso selecionado.",
       });
 
     const courseData = COURSE_CATALOG[curso];
+    const config = await getCourseConfig(curso);
     let documentUrl = courseData.externalUrl || "";
+    const pdfPath = config.pdf_path || courseData.storagePath;
 
-    if (courseData.storagePath) {
+    if (pdfPath) {
       const secondsRemaining = Math.max(
         1,
         Math.min(
@@ -1204,10 +1340,9 @@ app.post("/cursos/validar", async (req, res) => {
       );
       const { data: signed, error: signedError } = await supabase.storage
         .from("cursos")
-        .createSignedUrl(courseData.storagePath, secondsRemaining);
+        .createSignedUrl(pdfPath, secondsRemaining);
 
-      if (signedError) throw signedError;
-      documentUrl = signed.signedUrl;
+      if (!signedError) documentUrl = signed.signedUrl;
     }
 
     res.json({
@@ -1215,10 +1350,109 @@ app.post("/cursos/validar", async (req, res) => {
       curso: { codigo: curso, nome: courseData.nome },
       expires_at: acesso.expires_at,
       document_url: documentUrl,
+      config: {
+        titulo_documento: config.titulo_documento,
+        conteudo_documento: config.conteudo_documento,
+        imagens: config.imagens || [],
+        perguntas: config.perguntas || [],
+      },
     });
   } catch (err) {
     console.error("Erro ao validar curso:", err.message);
     res.status(500).json({ erro: "Erro ao abrir o material do curso." });
+  }
+});
+
+app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
+  try {
+    const curso = normalizeCourse(req.params.curso);
+    if (!curso) return res.status(400).json({ erro: "Curso invalido." });
+
+    const acesso = await findActiveCourseAccess(req.member.discord_id, curso);
+    if (!acesso) {
+      return res.status(403).json({
+        erro: "Seu acesso ao curso expirou. Solicite uma nova liberacao.",
+      });
+    }
+
+    const config = await getCourseConfig(curso);
+    const respostas = Array.isArray(req.body?.respostas)
+      ? req.body.respostas
+      : [];
+    const perguntas = Array.isArray(config.perguntas) ? config.perguntas : [];
+    if (!perguntas.length) {
+      return res.status(400).json({ erro: "Este formulario ainda nao possui perguntas." });
+    }
+
+    for (const pergunta of perguntas) {
+      const resposta = respostas.find(
+        (item) => String(item?.id) === String(pergunta.id),
+      );
+      if (pergunta.obrigatoria !== false && !String(resposta?.resposta || "").trim()) {
+        return res
+          .status(400)
+          .json({ erro: `Responda: ${pergunta.pergunta}` });
+      }
+    }
+
+    const webhook = COURSE_WEBHOOKS[curso];
+    if (!webhook) {
+      return res.status(503).json({
+        erro: "O canal de respostas deste curso ainda nao foi configurado.",
+      });
+    }
+
+    const answerText = perguntas
+      .map((pergunta, index) => {
+        const resposta = respostas.find(
+          (item) => String(item?.id) === String(pergunta.id),
+        );
+        return `**${index + 1}. ${pergunta.pergunta}**\n${String(
+          resposta?.resposta || "Sem resposta",
+        ).trim()}`;
+      })
+      .join("\n\n");
+
+    const content = [
+      `## RESPOSTAS DE CURSO - ${COURSE_CATALOG[curso].nome}`,
+      `Aluno: <@${req.member.discord_id}>`,
+      `Nome: ${req.member.nome}`,
+      `ID in-game: ${req.member.ingame_id}`,
+      "",
+      answerText,
+    ].join("\n");
+
+    const chunks = [];
+    let remaining = content;
+    while (remaining.length > 1900) {
+      let splitAt = remaining.lastIndexOf("\n\n", 1900);
+      if (splitAt < 500) splitAt = 1900;
+      chunks.push(remaining.slice(0, splitAt));
+      remaining = remaining.slice(splitAt).trimStart();
+    }
+    if (remaining) chunks.push(remaining);
+
+    for (const chunk of chunks) {
+      const discordResponse = await fetch(webhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: chunk }),
+      });
+      if (!discordResponse.ok) {
+        throw new Error(`Discord respondeu ${discordResponse.status}.`);
+      }
+    }
+
+    await registrarLog({
+      acao: "curso_respostas_enviadas",
+      admin: req.member.nome,
+      discord_id: req.member.discord_id,
+      detalhes: `Respostas enviadas para ${curso}.`,
+    });
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro ao enviar respostas do curso:", err.message);
+    res.status(500).json({ erro: "Erro ao enviar respostas do curso." });
   }
 });
 
