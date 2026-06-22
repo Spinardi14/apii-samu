@@ -25,13 +25,27 @@ const DISCORD_WEBHOOK_CONTA_APROVADA =
   process.env.DISCORD_WEBHOOK_CONTA_APROVADA ||
   "https://discordapp.com/api/webhooks/1518400663338356847/zmwMfKq7yMHTRgie0D8noAqjm7ApOQFhj7OSnNYo1eXqB1i0togtsqp7DdcLyvoo16cK";
 const COURSE_WEBHOOKS = {
-  recrutadores: process.env.DISCORD_WEBHOOK_CURSO_RECRUTADORES,
-  professores: process.env.DISCORD_WEBHOOK_CURSO_PROFESSORES,
-  financeiro: process.env.DISCORD_WEBHOOK_CURSO_FINANCEIRO,
-  cfs: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
-  cfm: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
-  cig: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
-  desligamento: process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL,
+  recrutadores:
+    process.env.DISCORD_WEBHOOK_CURSO_RECRUTADORES ||
+    "https://discordapp.com/api/webhooks/1209321398141456425/oSBQ6I3RA1jE0CUG9DxqWTSWhFZ3qxf_3mYFWqj7HtHPvcmd9whZCsJF-TD8v7dF19m5",
+  professores:
+    process.env.DISCORD_WEBHOOK_CURSO_PROFESSORES ||
+    "https://discordapp.com/api/webhooks/1275583479681384471/r0uBwHspcoe9nxEugGKGFY5qnUff84unIWLfmDep6NWD51eJ6K_Gjb4LRxysVm-SWJES",
+  financeiro:
+    process.env.DISCORD_WEBHOOK_CURSO_FINANCEIRO ||
+    "https://discordapp.com/api/webhooks/1320195312354328606/xY4kBKykDa2C1kszZol6O80iWaL-vMLKi6FXCvSqs-uBAQ841fI-734Ap5gsru5DpfEJ",
+  cfs:
+    process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL ||
+    "https://discordapp.com/api/webhooks/1275818838562443344/IFxupynUwhrudL8FTQqBfY9PqLcSEce5PrEIghKbFVim1r0bQptmpKtE8swr8-joG39z",
+  cfm:
+    process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL ||
+    "https://discordapp.com/api/webhooks/1275818838562443344/IFxupynUwhrudL8FTQqBfY9PqLcSEce5PrEIghKbFVim1r0bQptmpKtE8swr8-joG39z",
+  cig:
+    process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL ||
+    "https://discordapp.com/api/webhooks/1275818838562443344/IFxupynUwhrudL8FTQqBfY9PqLcSEce5PrEIghKbFVim1r0bQptmpKtE8swr8-joG39z",
+  desligamento:
+    process.env.DISCORD_WEBHOOK_CURSO_OPERACIONAL ||
+    "https://discordapp.com/api/webhooks/1275818838562443344/IFxupynUwhrudL8FTQqBfY9PqLcSEce5PrEIghKbFVim1r0bQptmpKtE8swr8-joG39z",
 };
 
 function normalizeDiscordWebhook(value) {
