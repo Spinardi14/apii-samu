@@ -624,15 +624,25 @@ app.post("/portal/heartbeat", requireMember, async (req, res) => {
 app.get("/portal/online", async (req, res) => {
   try {
     const since = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-    const { count, error } = await supabase
+    const { data, error } = await supabase
       .from("membros_portal")
-      .select("id", { count: "exact", head: true })
+      .select("id, nome, discord_nome, avatar_url")
       .eq("status", "ativo")
-      .gte("last_seen_at", since);
+      .gte("last_seen_at", since)
+      .order("last_seen_at", { ascending: false })
+      .limit(12);
     if (error) throw error;
-    res.json({ online: count || 0 });
+    const usuarios = Array.isArray(data)
+      ? data.map((member) => ({
+          id: member.id,
+          nome: member.nome,
+          discord_nome: member.discord_nome,
+          avatar_url: member.avatar_url,
+        }))
+      : [];
+    res.json({ online: usuarios.length, usuarios });
   } catch (err) {
-    res.json({ online: 0 });
+    res.json({ online: 0, usuarios: [] });
   }
 });
 
