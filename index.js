@@ -21,6 +21,9 @@ const CHANNEL_PUBLICACOES = process.env.CHANNEL_PUBLICACOES;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DISCORD_WEBHOOK_SALARIOS = process.env.DISCORD_WEBHOOK_SALARIOS;
+const DISCORD_WEBHOOK_CONTA_APROVADA =
+  process.env.DISCORD_WEBHOOK_CONTA_APROVADA ||
+  "https://discordapp.com/api/webhooks/1518400663338356847/zmwMfKq7yMHTRgie0D8noAqjm7ApOQFhj7OSnNYo1eXqB1i0togtsqp7DdcLyvoo16cK";
 const COURSE_WEBHOOKS = {
   recrutadores: process.env.DISCORD_WEBHOOK_CURSO_RECRUTADORES,
   professores: process.env.DISCORD_WEBHOOK_CURSO_PROFESSORES,
@@ -40,6 +43,28 @@ function normalizeDiscordWebhook(value) {
   )
     ? webhook
     : "";
+}
+
+async function enviarAvisoContaAprovada(member) {
+  const webhook = normalizeDiscordWebhook(DISCORD_WEBHOOK_CONTA_APROVADA);
+  const discordId = String(member?.discord_id || "").trim();
+  if (!webhook || !discordId) return;
+
+  const mention = /^\d{17,20}$/.test(discordId)
+    ? `<@${discordId}>`
+    : discordId;
+
+  try {
+    await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: `Usuário ${mention}, sua conta foi aprovada em nosso portal. Acesse: https://comprasamu.netlify.app/`,
+      }),
+    });
+  } catch (err) {
+    console.error("Erro ao avisar conta aprovada:", err.message);
+  }
 }
 
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
@@ -737,11 +762,14 @@ app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
     const status = req.params.acao === "aprovar" ? "ativo" : "desativado";
     if (!["aprovar", "desativar"].includes(req.params.acao))
       return res.status(400).json({ erro: "Acao invalida." });
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("membros_portal")
       .update({ status })
-      .eq("id", req.params.id);
+      .eq("id", req.params.id)
+      .select("id, nome, discord_id")
+      .single();
     if (error) throw error;
+    if (req.params.acao === "aprovar") await enviarAvisoContaAprovada(data);
     res.json({ sucesso: true });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao atualizar membro." });
