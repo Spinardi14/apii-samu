@@ -1465,12 +1465,6 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
     const curso = normalizeCourse(req.params.curso);
     if (!curso) return res.status(400).json({ erro: "Curso invalido." });
 
-    const acesso = await findActiveMemberCourseAccess(req.member, curso);
-    if (!acesso) {
-      return res.status(403).json({
-        erro: "Seu acesso ao curso expirou. Solicite uma nova liberacao.",
-      });
-    }
 
     const config = await getCourseConfig(curso);
     const respostas = Array.isArray(req.body?.respostas)
