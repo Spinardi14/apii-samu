@@ -329,6 +329,7 @@ function publicMember(member) {
     avatar_url: member.avatar_url || "",
     status: member.status,
     created_at: member.created_at,
+    cargo_discord: member.cargo_discord || null,
   };
 }
 
@@ -360,7 +361,10 @@ async function requireMember(req, res, next) {
       memberSessions.delete(token);
       return res.status(403).json({ erro: "Esta conta nao esta mais ativa." });
     }
-    req.member = publicMember(member);
+    req.member = publicMember({
+      ...member,
+      cargo_discord: await getMemberHierarchyRole(member.discord_id),
+    });
     req.memberToken = token;
     next();
   } catch (err) {
@@ -655,8 +659,12 @@ app.post("/portal/login", async (req, res) => {
       .from("membros_portal")
       .update({ last_seen_at: new Date().toISOString() })
       .eq("id", member.id);
-    const token = createMemberToken(member);
-    res.json({ sucesso: true, token, membro: publicMember(member) });
+    const memberWithRole = {
+      ...member,
+      cargo_discord: await getMemberHierarchyRole(member.discord_id),
+    };
+    const token = createMemberToken(memberWithRole);
+    res.json({ sucesso: true, token, membro: publicMember(memberWithRole) });
   } catch (err) {
     console.error("Erro portal/login:", err.message);
     res.status(500).json({ erro: "Erro ao entrar no portal." });
