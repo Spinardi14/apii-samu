@@ -117,6 +117,32 @@ const ROLE_PROFESSOR_DESTAQUE = "1296282873665687642";
 const ROLE_LIDER_RECRUTADORES = "1490842076890271877";
 const ROLE_LIDER_PROFESSORES = "1490842864492744784";
 const ROLE_LIDER_FINANCEIRO = "1490842590826725406";
+const SAMU_HIERARCHY_ROLE_IDS = [
+  "1207346475915415613",
+  "1208539507024990352",
+  "1207481663613964328",
+  "1207547020236029992",
+  "1207547082878095371",
+  "1207481660237414491",
+  "1207481659520188456",
+  "1207481661139324979",
+  "1207481657142022184",
+  "1207480798727643206",
+  "1207480791773351976",
+  "1207480795397357628",
+  "1207480596452999168",
+  "1207346472425885776",
+  "1207346471054086174",
+  "1207346467107381269",
+  "1207346465282850856",
+  "1207346464133746688",
+  "1207346459175817258",
+  "1207346456143331388",
+  "1207346457301098496",
+  "1233820013736230942",
+  "1095129205051772979",
+  "1095129205051772981",
+];
 
 const client = new Client({
   intents: [
@@ -159,6 +185,40 @@ async function getGuild() {
     guildCache = await client.guilds.fetch(GUILD_ID);
   }
   return guildCache;
+}
+
+async function getMemberHierarchyRole(discordId) {
+  const id = String(discordId || "").trim();
+  if (!/^\d{17,20}$/.test(id)) return null;
+
+  try {
+    const guild = await getGuild();
+    const member = await guild.members.fetch(id).catch(() => null);
+    if (!member) return null;
+
+    const role = SAMU_HIERARCHY_ROLE_IDS.map((roleId) =>
+      member.roles.cache.get(roleId),
+    ).find(Boolean);
+    if (!role) return null;
+
+    const joinedAt = member.joinedAt || null;
+    const dias = joinedAt
+      ? Math.max(0, Math.floor((Date.now() - joinedAt.getTime()) / 86400000))
+      : null;
+
+    return {
+      id: role.id,
+      nome: role.name,
+      cor:
+        role.hexColor && role.hexColor !== "#000000"
+          ? role.hexColor
+          : "#111827",
+      dias,
+    };
+  } catch (err) {
+    console.error("Erro ao buscar cargo do membro:", err.message);
+    return null;
+  }
 }
 
 function formatCurrency(value) {
@@ -646,6 +706,19 @@ app.get("/portal/online", async (req, res) => {
   }
 });
 
+app.get("/portal/membros-count", async (req, res) => {
+  try {
+    const { count, error } = await supabase
+      .from("membros_portal")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "ativo");
+    if (error) throw error;
+    res.json({ total: count || 0 });
+  } catch (err) {
+    res.json({ total: 0 });
+  }
+});
+
 app.post("/portal/compras-cargos", requireMember, async (req, res) => {
   try {
     const metodo = String(req.body?.metodo || "").toLowerCase();
@@ -775,7 +848,19 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
       )
       .order("created_at", { ascending: false });
     if (error) throw error;
-    res.json(data || []);
+    const membros = await Promise.all(
+      (data || []).map(async (member) => ({
+        ...member,
+        cargo_discord: await getMemberHierarchyRole(member.discord_id),
+      })),
+    );
+    membros.sort((a, b) => {
+      const aLogin = a.last_seen_at ? new Date(a.last_seen_at).getTime() : 0;
+      const bLogin = b.last_seen_at ? new Date(b.last_seen_at).getTime() : 0;
+      if (bLogin !== aLogin) return bLogin - aLogin;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+    res.json(membros);
   } catch (err) {
     res.status(500).json({ erro: "Erro ao carregar membros do portal." });
   }
