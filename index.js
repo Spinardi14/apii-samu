@@ -781,6 +781,28 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
   }
 });
 
+app.patch("/admin/membros-portal/:id/senha", requireAdmin, async (req, res) => {
+  try {
+    const senha = String(req.body?.senha || "");
+    if (senha.length < 6)
+      return res
+        .status(400)
+        .json({ erro: "A senha precisa ter pelo menos 6 caracteres." });
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const senha_hash = hashMemberPassword(senha, salt);
+    const { error } = await supabase
+      .from("membros_portal")
+      .update({ senha_hash, salt })
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao atualizar senha." });
+  }
+});
+
 app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
   try {
     const status = req.params.acao === "aprovar" ? "ativo" : "desativado";
