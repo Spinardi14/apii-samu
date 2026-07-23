@@ -903,7 +903,11 @@ app.patch("/admin/membros-portal/:id/senha", requireAdmin, async (req, res) => {
     if (!member)
       return res.status(404).json({ erro: "Membro nao encontrado." });
     const cargo = await getMemberHierarchyRole(member.discord_id);
-    if (cargo?.nome === "[OWNER]") {
+    if (
+      String(cargo?.nome || "")
+        .toUpperCase()
+        .includes("OWNER")
+    ) {
       return res
         .status(403)
         .json({ erro: "A senha da conta OWNER nao pode ser alterada." });
@@ -934,6 +938,24 @@ app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
     const status = req.params.acao === "aprovar" ? "ativo" : "desativado";
     if (!["aprovar", "desativar"].includes(req.params.acao))
       return res.status(400).json({ erro: "Acao invalida." });
+    const { data: member, error: memberError } = await supabase
+      .from("membros_portal")
+      .select("discord_id")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (memberError) throw memberError;
+    if (!member)
+      return res.status(404).json({ erro: "Membro nao encontrado." });
+    const cargo = await getMemberHierarchyRole(member.discord_id);
+    if (
+      String(cargo?.nome || "")
+        .toUpperCase()
+        .includes("OWNER")
+    ) {
+      return res
+        .status(403)
+        .json({ erro: "A conta OWNER nao pode ser alterada." });
+    }
     const { data, error } = await supabase
       .from("membros_portal")
       .update({ status })
@@ -950,6 +972,24 @@ app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
 
 app.delete("/admin/membros-portal/:id", requireAdmin, async (req, res) => {
   try {
+    const { data: member, error: memberError } = await supabase
+      .from("membros_portal")
+      .select("discord_id")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (memberError) throw memberError;
+    if (!member)
+      return res.status(404).json({ erro: "Membro nao encontrado." });
+    const cargo = await getMemberHierarchyRole(member.discord_id);
+    if (
+      String(cargo?.nome || "")
+        .toUpperCase()
+        .includes("OWNER")
+    ) {
+      return res
+        .status(403)
+        .json({ erro: "A conta OWNER nao pode ser removida." });
+    }
     const { error } = await supabase
       .from("membros_portal")
       .delete()
