@@ -495,6 +495,24 @@ async function getCourseConfig(course) {
   );
 }
 
+async function getFlyerPaths() {
+  const { data, error } = await supabase
+    .from("logs")
+    .select("detalhes")
+    .eq("acao", "flyers_site")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  try {
+    const paths = JSON.parse(data?.detalhes || "[]");
+    return Array.isArray(paths) ? paths.slice(0, 3) : [];
+  } catch {
+    return [];
+  }
+}
+
 async function registrarLog({
   acao,
   admin = "sistema",
@@ -876,6 +894,21 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
 
 app.patch("/admin/membros-portal/:id/senha", requireAdmin, async (req, res) => {
   try {
+    const { data: member, error: memberError } = await supabase
+      .from("membros_portal")
+      .select("discord_id")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (memberError) throw memberError;
+    if (!member)
+      return res.status(404).json({ erro: "Membro nao encontrado." });
+    const cargo = await getMemberHierarchyRole(member.discord_id);
+    if (cargo?.nome === "[OWNER]") {
+      return res
+        .status(403)
+        .json({ erro: "A senha da conta OWNER nao pode ser alterada." });
+    }
+
     const senha = String(req.body?.senha || "");
     if (senha.length < 6)
       return res
@@ -1309,6 +1342,96 @@ app.get("/cursos", (req, res) => {
   );
 });
 
+app.get("/flyers", async (req, res) => {
+  try {
+    const paths = await getFlyerPaths();
+    const flyers = await Promise.all(
+      paths.map(async (path, slot) => {
+        if (!path) return null;
+        const { data, error } = await supabase.storage
+          .from("cursos")
+          .createSignedUrl(path, 60 * 60);
+        if (error) return null;
+        return { slot, path, url: data.signedUrl };
+      }),
+    );
+    res.json(flyers.filter(Boolean));
+  } catch (err) {
+    console.error("Erro ao carregar flyers:", err.message);
+    res.json([]);
+  }
+});
+
+app.put(
+  "/admin/flyers/:slot",
+  requireAdmin,
+  express.raw({ type: "image/*", limit: "8mb" }),
+  async (req, res) => {
+    try {
+      const slot = Number(req.params.slot);
+      if (![0, 1, 2].includes(slot)) {
+        return res.status(400).json({ erro: "Posicao de flyer invalida." });
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ erro: "Selecione uma imagem valida." });
+      }
+
+      const contentType = String(req.headers["content-type"] || "");
+      const extension =
+        contentType === "image/png"
+          ? "png"
+          : contentType === "image/webp"
+            ? "webp"
+            : contentType === "image/gif"
+              ? "gif"
+              : "jpg";
+      const path = `flyers/${slot}-${Date.now()}.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from("cursos")
+        .upload(path, req.body, { contentType, upsert: false });
+      if (uploadError) throw uploadError;
+
+      const paths = await getFlyerPaths();
+      const oldPath = paths[slot];
+      paths[slot] = path;
+      await registrarLog({
+        acao: "flyers_site",
+        admin: req.admin.usuario,
+        detalhes: JSON.stringify(paths),
+      });
+      if (oldPath) {
+        await supabase.storage.from("cursos").remove([oldPath]);
+      }
+      res.json({ sucesso: true });
+    } catch (err) {
+      console.error("Erro ao salvar flyer:", err.message);
+      res.status(500).json({ erro: "Erro ao salvar flyer." });
+    }
+  },
+);
+
+app.delete("/admin/flyers/:slot", requireAdmin, async (req, res) => {
+  try {
+    const slot = Number(req.params.slot);
+    if (![0, 1, 2].includes(slot)) {
+      return res.status(400).json({ erro: "Posicao de flyer invalida." });
+    }
+    const paths = await getFlyerPaths();
+    const oldPath = paths[slot];
+    paths[slot] = null;
+    await registrarLog({
+      acao: "flyers_site",
+      admin: req.admin.usuario,
+      detalhes: JSON.stringify(paths),
+    });
+    if (oldPath) await supabase.storage.from("cursos").remove([oldPath]);
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error("Erro ao remover flyer:", err.message);
+    res.status(500).json({ erro: "Erro ao remover flyer." });
+  }
+});
+
 app.get("/admin/cursos/:curso/config", requireAdmin, async (req, res) => {
   try {
     const curso = normalizeCourse(req.params.curso);
@@ -1440,33 +1563,33 @@ app.post(
   async (req, res) => {
     try {
       const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
+      const curso = normalizeCourse(req.body?.curso);
 
-      if (!/^\d+$/.test(discordId)) {
+      if (!/^\d+$/.test(discordId) || !curso) {
         return res.status(400).json({
-          erro: "Informe um ID do Discord valido, somente com numeros.",
+          erro: "Informe um ID do Discord valido e selecione o curso.",
         });
       }
 
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      const cursos = Object.keys(COURSE_CATALOG);
 
       await supabase
         .from("acessos_cursos")
         .update({ revoked_at: new Date().toISOString() })
         .eq("discord_id", discordId)
+        .eq("curso", curso)
         .is("revoked_at", null);
-
-      const registros = cursos.map((curso) => ({
-        discord_id: discordId,
-        curso,
-        liberado_por: req.admin.usuario,
-        expires_at: expiresAt,
-      }));
 
       const { data, error } = await supabase
         .from("acessos_cursos")
-        .insert(registros)
-        .select("id, discord_id, curso, liberado_por, expires_at");
+        .insert({
+          discord_id: discordId,
+          curso,
+          liberado_por: req.admin.usuario,
+          expires_at: expiresAt,
+        })
+        .select("id, discord_id, curso, liberado_por, expires_at")
+        .single();
 
       if (error) throw error;
 
@@ -1474,9 +1597,9 @@ app.post(
         acao: "curso_acesso_liberado",
         admin: req.admin.usuario,
         discord_id: discordId,
-        detalhes: "Todos os cursos liberados por 60 minutos.",
+        detalhes: `Curso ${curso} liberado por 60 minutos.`,
       });
-      res.json({ sucesso: true, acessos: data || [], expires_at: expiresAt });
+      res.json({ sucesso: true, acesso: data, expires_at: expiresAt });
     } catch (err) {
       console.error("Erro ao liberar curso:", err.message);
       res.status(500).json({ erro: "Erro ao liberar acesso ao curso." });
@@ -1502,15 +1625,14 @@ app.delete(
       const { error } = await supabase
         .from("acessos_cursos")
         .update({ revoked_at: new Date().toISOString() })
-        .eq("discord_id", acesso.discord_id)
-        .is("revoked_at", null);
+        .eq("id", acesso.id);
 
       if (error) throw error;
       await registrarLog({
         acao: "curso_acesso_revogado",
         admin: req.admin.usuario,
         discord_id: acesso.discord_id,
-        detalhes: "Todos os cursos revogados.",
+        detalhes: `Curso ${acesso.curso} revogado.`,
       });
       res.json({ sucesso: true });
     } catch (err) {
@@ -1735,6 +1857,8 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
       valor_solicitado,
       valor_bruto,
       taxa_financeiro,
+      taxa_saque,
+      taxa_super_salario,
       tipo_pagamento,
       dia,
       horario,
@@ -1759,11 +1883,22 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
     const valorSolicitado = toInt(valor_solicitado);
     const valorBruto =
       valor_bruto !== undefined ? toInt(valor_bruto) : valorSolicitado;
-    const taxaFinanceiro =
+    const comissaoFinanceiro =
       taxa_financeiro !== undefined
         ? toInt(taxa_financeiro)
         : Math.round(valorSolicitado * 0.1);
-    const valorAposTaxa = Math.max(valorSolicitado - taxaFinanceiro, 0);
+    const taxaSaque = Math.round(valorBruto * 0.03);
+    const taxaSuperSalario =
+      valorBruto >= 4000000
+        ? Math.round(valorBruto * 0.07)
+        : 0;
+    const valorAposTaxas = Math.max(
+      valorSolicitado -
+        comissaoFinanceiro -
+        taxaSaque -
+        taxaSuperSalario,
+      0,
+    );
 
     if (tipoPagamento === "ambos") {
       const semana = getCurrentWeekRange();
@@ -1809,7 +1944,7 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
     }
 
     const multasPendentes = multas || [];
-    let saldoParaDesconto = valorAposTaxa;
+    let saldoParaDesconto = valorAposTaxas;
     const multasProcessadas = multasPendentes.map((multa) => {
       const valorOriginal = toInt(multa.valor);
       const valorAbatido = Math.min(valorOriginal, saldoParaDesconto);
@@ -1832,7 +1967,7 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
       (total, multa) => total + multa.valor_restante,
       0,
     );
-    const valorPago = Math.max(valorAposTaxa - valorDescontado, 0);
+    const valorPago = Math.max(valorAposTaxas - valorDescontado, 0);
 
     const { data: pagamento, error: pagamentoError } = await supabase
       .from("pagamentos")
@@ -1911,7 +2046,11 @@ app.post("/solicitar-salario", requireMember, async (req, res) => {
         `Tipo de pagamento: ${tipoPagamentoLabel}\n` +
         `Cargo: ${cargo}\n` +
         `Valor solicitado: **${formatCurrency(valorSolicitado)}**\n` +
-        `Taxa Financeiro (-10%): **-${formatCurrency(taxaFinanceiro)}**\n` +
+        `Comissão do Financeiro (-10%): **-${formatCurrency(comissaoFinanceiro)}**\n` +
+        `Taxa de Saque (-3%): **-${formatCurrency(taxaSaque)}**\n` +
+        (taxaSuperSalario > 0
+          ? `Imposto Super Salário (-7%): **-${formatCurrency(taxaSuperSalario)}**\n`
+          : "") +
         `Multas descontadas: **-${formatCurrency(valorDescontado)}**\n` +
         (valorPendenteMultas > 0
           ? `Restante de multas pendentes: **${formatCurrency(valorPendenteMultas)}**\n`
