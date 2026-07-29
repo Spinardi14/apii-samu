@@ -157,7 +157,14 @@ const client = new Client({
 
 let guildCache = null;
 
-client.once("ready", async () => {
+// Sobe a API imediatamente, sem depender da conexão com o Discord.
+// Isso evita que o Render fique aguardando o evento do bot para liberar a porta HTTP.
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`API rodando na porta ${PORT}`);
+});
+
+// Inicializa o Discord separadamente da API.
+client.once("clientReady", async () => {
   console.log(`Bot online: ${client.user.tag}`);
 
   try {
@@ -168,16 +175,14 @@ client.once("ready", async () => {
     try {
       await guildCache.members.fetch();
       console.log("Membros carregados em cache.");
-    } catch {
-      console.log("Aviso: nao foi possivel carregar todos os membros.");
+    } catch (err) {
+      console.error("Aviso ao carregar membros:", err.message);
     }
+
+    console.log("Discord inicializado.");
   } catch (err) {
     console.error("Erro ao preparar servidor:", err.message);
   }
-
-  app.listen(PORT, () => {
-    console.log(`API rodando na porta ${PORT}`);
-  });
 });
 
 async function getGuild() {
@@ -2439,4 +2444,6 @@ app.get("/publicacoes", async (req, res) => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch((err) => {
+  console.error("Erro ao conectar Discord:", err);
+});
