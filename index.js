@@ -567,8 +567,10 @@ app.post("/portal/registrar", async (req, res) => {
 
     if (!nomeInformado)
       return res.status(400).json({ erro: "Informe seu nome." });
-    if (!ingameId) {
-      return res.status(400).json({ erro: "Informe seu ID in-game." });
+    if (!/^\d{1,6}$/.test(ingameId)) {
+      return res.status(400).json({
+        erro: "Informe seu ID in-game com no maximo 6 digitos.",
+      });
     }
     if (!/^\d{17,20}$/.test(discordId)) {
       return res.status(400).json({
@@ -1610,9 +1612,9 @@ app.post(
       const discordId = String(req.body?.discord_id || "").replace(/\s/g, "");
       const curso = normalizeCourse(req.body?.curso);
 
-      if (!/^\d+$/.test(discordId) || !curso) {
+      if (!/^\d{1,6}$/.test(discordId) || !curso) {
         return res.status(400).json({
-          erro: "Informe um ID do Discord valido e selecione o curso.",
+          erro: "Informe um ID in-game de ate 6 digitos e selecione o curso.",
         });
       }
 
