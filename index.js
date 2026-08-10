@@ -334,6 +334,8 @@ function publicMember(member) {
     avatar_url: member.avatar_url || "",
     status: member.status,
     created_at: member.created_at,
+    birth_day: member.birth_day || null,
+    birth_month: member.birth_month || null,
     cargo_discord: member.cargo_discord || null,
   };
 }
@@ -357,7 +359,7 @@ async function requireMember(req, res, next) {
     const { data: member, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status, birth_day, birth_month",
       )
       .eq("id", sessionMember.id)
       .maybeSingle();
@@ -657,7 +659,7 @@ app.post("/portal/login", async (req, res) => {
     const { data: member, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, senha_hash, salt, status",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, senha_hash, salt, status, birth_day, birth_month",
       )
       .eq("ingame_id", ingameId)
       .maybeSingle();
@@ -698,6 +700,107 @@ app.post("/portal/login", async (req, res) => {
 
 app.get("/portal/me", requireMember, (req, res) => {
   res.json({ sucesso: true, membro: req.member });
+});
+
+app.patch("/portal/aniversario", requireMember, async (req, res) => {
+  try {
+    if (req.member.birth_day && req.member.birth_month) {
+      return res.status(409).json({ erro: "A data de aniversario ja foi informada." });
+    }
+    const day = Number(req.body?.day);
+    const month = Number(req.body?.month);
+    const validDate =
+      Number.isInteger(day) &&
+      Number.isInteger(month) &&
+      month >= 1 &&
+      month <= 12 &&
+      day >= 1 &&
+      day <= new Date(2024, month, 0).getDate();
+    if (!validDate)
+      return res.status(400).json({ erro: "Informe um dia e mes validos." });
+
+    const { data, error } = await supabase
+      .from("membros_portal")
+      .update({ birth_day: day, birth_month: month })
+      .eq("id", req.member.id)
+      .is("birth_day", null)
+      .select(
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status, birth_day, birth_month",
+      )
+      .maybeSingle();
+    if (error) throw error;
+    if (!data)
+      return res.status(409).json({ erro: "A data de aniversario ja foi informada." });
+
+    const membro = publicMember({
+      ...data,
+      cargo_discord: req.member.cargo_discord,
+    });
+    memberSessions.set(req.memberToken, membro);
+    res.json({ sucesso: true, membro });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao salvar a data de aniversario." });
+  }
+});
+
+app.get("/portal/aniversariantes", requireMember, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("membros_portal")
+      .select("id, nome, discord_nome, avatar_url, birth_day, birth_month")
+      .eq("status", "ativo")
+      .not("birth_day", "is", null)
+      .not("birth_month", "is", null);
+    if (error) throw error;
+
+    const now = new Date();
+    const todayValue = now.getMonth() * 100 + now.getDate();
+    const ranked = (data || [])
+      .map((member) => {
+        const value = (Number(member.birth_month) - 1) * 100 + Number(member.birth_day);
+        return {
+          ...member,
+          is_today: value === todayValue,
+          distance: value >= todayValue ? value - todayValue : 1300 - todayValue + value,
+        };
+      })
+      .sort((a, b) => a.distance - b.distance || a.nome.localeCompare(b.nome, "pt-BR"))
+      .slice(0, 2)
+      .map(({ distance, ...member }) => member);
+
+    res.json(ranked);
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao carregar aniversariantes." });
+  }
+});
+
+app.get("/portal/notificacoes", requireMember, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("portal_notifications")
+      .select("id, mensagem, enviado_por, created_at, read_at")
+      .eq("member_id", req.member.id)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao carregar notificacoes." });
+  }
+});
+
+app.patch("/portal/notificacoes/:id/lida", requireMember, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("portal_notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("id", req.params.id)
+      .eq("member_id", req.member.id);
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao marcar notificacao como lida." });
+  }
 });
 
 app.post("/portal/heartbeat", requireMember, async (req, res) => {
@@ -877,7 +980,7 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
     const { data, error } = await supabase
       .from("membros_portal")
       .select(
-        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status, last_seen_at",
+        "id, created_at, nome, ingame_id, discord_id, discord_nome, avatar_url, status, last_seen_at, birth_day, birth_month",
       )
       .order("created_at", { ascending: false });
     if (error) throw error;
@@ -896,6 +999,38 @@ app.get("/admin/membros-portal", requireAdmin, async (req, res) => {
     res.json(membros);
   } catch (err) {
     res.status(500).json({ erro: "Erro ao carregar membros do portal." });
+  }
+});
+
+app.post("/admin/notificacoes", requireAdmin, async (req, res) => {
+  try {
+    const memberId = String(req.body?.member_id || "").trim();
+    const mensagem = String(req.body?.mensagem || "").trim().slice(0, 1000);
+    if (!memberId || !mensagem)
+      return res.status(400).json({ erro: "Selecione o membro e escreva a mensagem." });
+
+    const { data: member, error: memberError } = await supabase
+      .from("membros_portal")
+      .select("id")
+      .eq("id", memberId)
+      .maybeSingle();
+    if (memberError) throw memberError;
+    if (!member)
+      return res.status(404).json({ erro: "Membro nao encontrado." });
+
+    const { data, error } = await supabase
+      .from("portal_notifications")
+      .insert({
+        member_id: memberId,
+        mensagem,
+        enviado_por: req.admin.nome || req.admin.usuario,
+      })
+      .select("id, mensagem, enviado_por, created_at, read_at")
+      .single();
+    if (error) throw error;
+    res.json({ sucesso: true, notificacao: data });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao enviar notificacao." });
   }
 });
 
