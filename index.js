@@ -1034,6 +1034,37 @@ app.post("/admin/notificacoes", requireAdmin, async (req, res) => {
   }
 });
 
+app.post("/admin/notificacoes/massa", requireAdmin, async (req, res) => {
+  try {
+    const mensagem = String(req.body?.mensagem || "").trim().slice(0, 1000);
+    if (!mensagem)
+      return res.status(400).json({ erro: "Escreva a mensagem para enviar." });
+
+    const { data: members, error: membersError } = await supabase
+      .from("membros_portal")
+      .select("id")
+      .limit(5000);
+    if (membersError) throw membersError;
+    if (!members?.length)
+      return res.status(404).json({ erro: "Nenhum membro encontrado." });
+
+    const enviadoPor = req.admin.nome || req.admin.usuario;
+    const notifications = members.map((member) => ({
+      member_id: String(member.id),
+      mensagem,
+      enviado_por: enviadoPor,
+    }));
+    const { error } = await supabase
+      .from("portal_notifications")
+      .insert(notifications);
+    if (error) throw error;
+
+    res.json({ sucesso: true, total: notifications.length });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao enviar notificacao em massa." });
+  }
+});
+
 app.patch("/admin/membros-portal/:id/senha", requireAdmin, async (req, res) => {
   try {
     const { data: member, error: memberError } = await supabase
