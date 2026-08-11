@@ -96,7 +96,7 @@ const ONLINE_CACHE_MS = 20 * 1000;
 const MEMBER_COUNT_CACHE_MS = 2 * 60 * 1000;
 const MAINTENANCE_CACHE_MS = 30 * 1000;
 const FLYERS_CACHE_MS = 50 * 60 * 1000;
-const BIRTHDAY_CACHE_MS = 10 * 60 * 1000;
+const BIRTHDAY_CACHE_MS = 60 * 1000;
 
 let onlineResponseCache = { expiresAt: 0, value: null };
 let memberCountResponseCache = { expiresAt: 0, value: null };
@@ -818,6 +818,9 @@ app.get("/portal/aniversariantes", requireMember, async (req, res) => {
     };
     res.json(ranked);
   } catch (err) {
+    if (birthdayResponseCache.value) {
+      return res.json(birthdayResponseCache.value);
+    }
     res.status(500).json({ erro: "Erro ao carregar aniversariantes." });
   }
 });
