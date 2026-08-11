@@ -88,6 +88,21 @@ if (!SUPABASE_SERVICE_ROLE_KEY)
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const adminSessions = new Map();
 const memberSessions = new Map();
+const memberSessionValidatedAt = new Map();
+const heartbeatWrittenAt = new Map();
+const MEMBER_REVALIDATE_MS = 5 * 60 * 1000;
+const HEARTBEAT_WRITE_MS = 55 * 1000;
+const ONLINE_CACHE_MS = 20 * 1000;
+const MEMBER_COUNT_CACHE_MS = 2 * 60 * 1000;
+const MAINTENANCE_CACHE_MS = 30 * 1000;
+const FLYERS_CACHE_MS = 50 * 60 * 1000;
+const BIRTHDAY_CACHE_MS = 10 * 60 * 1000;
+
+let onlineResponseCache = { expiresAt: 0, value: null };
+let memberCountResponseCache = { expiresAt: 0, value: null };
+let maintenanceResponseCache = { expiresAt: 0, value: null };
+let flyersResponseCache = { expiresAt: 0, value: null };
+let birthdayResponseCache = { expiresAt: 0, value: null };
 
 const COURSE_CATALOG = {
   recrutadores: {
@@ -343,7 +358,18 @@ function publicMember(member) {
 function createMemberToken(member) {
   const token = crypto.randomBytes(32).toString("hex");
   memberSessions.set(token, publicMember(member));
+  memberSessionValidatedAt.set(token, Date.now());
   return token;
+}
+
+function invalidateMemberSessions(memberId) {
+  const normalizedId = String(memberId || "");
+  for (const [token, member] of memberSessions.entries()) {
+    if (String(member?.id || "") !== normalizedId) continue;
+    memberSessions.delete(token);
+    memberSessionValidatedAt.delete(token);
+    heartbeatWrittenAt.delete(token);
+  }
 }
 
 async function requireMember(req, res, next) {
@@ -353,6 +379,13 @@ async function requireMember(req, res, next) {
 
   if (!sessionMember) {
     return res.status(401).json({ erro: "Sessao do portal invalida." });
+  }
+
+  const lastValidatedAt = memberSessionValidatedAt.get(token) || 0;
+  if (Date.now() - lastValidatedAt < MEMBER_REVALIDATE_MS) {
+    req.member = sessionMember;
+    req.memberToken = token;
+    return next();
   }
 
   try {
@@ -366,12 +399,16 @@ async function requireMember(req, res, next) {
     if (error) throw error;
     if (!member || member.status !== "ativo") {
       memberSessions.delete(token);
+      memberSessionValidatedAt.delete(token);
+      heartbeatWrittenAt.delete(token);
       return res.status(403).json({ erro: "Esta conta nao esta mais ativa." });
     }
     req.member = publicMember({
       ...member,
       cargo_discord: await getMemberHierarchyRole(member.discord_id),
     });
+    memberSessions.set(token, req.member);
+    memberSessionValidatedAt.set(token, Date.now());
     req.memberToken = token;
     next();
   } catch (err) {
@@ -737,6 +774,7 @@ app.patch("/portal/aniversario", requireMember, async (req, res) => {
       cargo_discord: req.member.cargo_discord,
     });
     memberSessions.set(req.memberToken, membro);
+    birthdayResponseCache = { expiresAt: 0, value: null };
     res.json({ sucesso: true, membro });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao salvar a data de aniversario." });
@@ -745,6 +783,12 @@ app.patch("/portal/aniversario", requireMember, async (req, res) => {
 
 app.get("/portal/aniversariantes", requireMember, async (req, res) => {
   try {
+    if (
+      birthdayResponseCache.value &&
+      Date.now() < birthdayResponseCache.expiresAt
+    ) {
+      return res.json(birthdayResponseCache.value);
+    }
     const { data, error } = await supabase
       .from("membros_portal")
       .select("id, nome, discord_nome, avatar_url, birth_day, birth_month")
@@ -768,6 +812,10 @@ app.get("/portal/aniversariantes", requireMember, async (req, res) => {
       .slice(0, 2)
       .map(({ distance, ...member }) => member);
 
+    birthdayResponseCache = {
+      value: ranked,
+      expiresAt: Date.now() + BIRTHDAY_CACHE_MS,
+    };
     res.json(ranked);
   } catch (err) {
     res.status(500).json({ erro: "Erro ao carregar aniversariantes." });
@@ -776,6 +824,16 @@ app.get("/portal/aniversariantes", requireMember, async (req, res) => {
 
 app.get("/portal/notificacoes", requireMember, async (req, res) => {
   try {
+    if (req.query.resumo === "1") {
+      const { count, error } = await supabase
+        .from("portal_notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("member_id", req.member.id)
+        .is("read_at", null);
+      if (error) throw error;
+      return res.json({ pendentes: count || 0 });
+    }
+
     const { data, error } = await supabase
       .from("portal_notifications")
       .select("id, mensagem, enviado_por, created_at, read_at")
@@ -786,6 +844,20 @@ app.get("/portal/notificacoes", requireMember, async (req, res) => {
     res.json(data || []);
   } catch (err) {
     res.status(500).json({ erro: "Erro ao carregar notificacoes." });
+  }
+});
+
+app.patch("/portal/notificacoes/lidas", requireMember, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("portal_notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("member_id", req.member.id)
+      .is("read_at", null);
+    if (error) throw error;
+    res.json({ sucesso: true });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao marcar notificacoes como lidas." });
   }
 });
 
@@ -805,12 +877,17 @@ app.patch("/portal/notificacoes/:id/lida", requireMember, async (req, res) => {
 
 app.post("/portal/heartbeat", requireMember, async (req, res) => {
   try {
+    const lastWrite = heartbeatWrittenAt.get(req.memberToken) || 0;
+    if (Date.now() - lastWrite < HEARTBEAT_WRITE_MS) {
+      return res.json({ sucesso: true, cache: true });
+    }
     const now = new Date().toISOString();
     const { error } = await supabase
       .from("membros_portal")
       .update({ last_seen_at: now })
       .eq("id", req.member.id);
     if (error) throw error;
+    heartbeatWrittenAt.set(req.memberToken, Date.now());
     res.json({ sucesso: true });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao atualizar presenca." });
@@ -819,6 +896,12 @@ app.post("/portal/heartbeat", requireMember, async (req, res) => {
 
 app.get("/portal/online", async (req, res) => {
   try {
+    if (
+      onlineResponseCache.value &&
+      Date.now() < onlineResponseCache.expiresAt
+    ) {
+      return res.json(onlineResponseCache.value);
+    }
     const since = new Date(Date.now() - 2 * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from("membros_portal")
@@ -836,7 +919,12 @@ app.get("/portal/online", async (req, res) => {
           avatar_url: member.avatar_url,
         }))
       : [];
-    res.json({ online: usuarios.length, usuarios });
+    const response = { online: usuarios.length, usuarios };
+    onlineResponseCache = {
+      value: response,
+      expiresAt: Date.now() + ONLINE_CACHE_MS,
+    };
+    res.json(response);
   } catch (err) {
     res.json({ online: 0, usuarios: [] });
   }
@@ -844,12 +932,23 @@ app.get("/portal/online", async (req, res) => {
 
 app.get("/portal/membros-count", async (req, res) => {
   try {
+    if (
+      memberCountResponseCache.value &&
+      Date.now() < memberCountResponseCache.expiresAt
+    ) {
+      return res.json(memberCountResponseCache.value);
+    }
     const { count, error } = await supabase
       .from("membros_portal")
       .select("id", { count: "exact", head: true })
       .eq("status", "ativo");
     if (error) throw error;
-    res.json({ total: count || 0 });
+    const response = { total: count || 0 };
+    memberCountResponseCache = {
+      value: response,
+      expiresAt: Date.now() + MEMBER_COUNT_CACHE_MS,
+    };
+    res.json(response);
   } catch (err) {
     res.json({ total: 0 });
   }
@@ -1136,6 +1235,8 @@ app.patch("/admin/membros-portal/:id/:acao", requireAdmin, async (req, res) => {
       .select("id, nome, discord_id")
       .single();
     if (error) throw error;
+    invalidateMemberSessions(req.params.id);
+    memberCountResponseCache = { expiresAt: 0, value: null };
     if (req.params.acao === "aprovar") await enviarAvisoContaAprovada(data);
     res.json({ sucesso: true });
   } catch (err) {
@@ -1168,6 +1269,8 @@ app.delete("/admin/membros-portal/:id", requireAdmin, async (req, res) => {
       .delete()
       .eq("id", req.params.id);
     if (error) throw error;
+    invalidateMemberSessions(req.params.id);
+    memberCountResponseCache = { expiresAt: 0, value: null };
     res.json({ sucesso: true });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao remover membro." });
@@ -1557,6 +1660,13 @@ app.get("/cursos", (req, res) => {
 
 app.get("/flyers", async (req, res) => {
   try {
+    if (
+      flyersResponseCache.value &&
+      Date.now() < flyersResponseCache.expiresAt
+    ) {
+      res.set("Cache-Control", "public, max-age=300");
+      return res.json(flyersResponseCache.value);
+    }
     const paths = await getFlyerPaths();
     const flyers = await Promise.all(
       paths.map(async (path, slot) => {
@@ -1568,7 +1678,13 @@ app.get("/flyers", async (req, res) => {
         return { slot, path, url: data.signedUrl };
       }),
     );
-    res.json(flyers.filter(Boolean));
+    const response = flyers.filter(Boolean);
+    flyersResponseCache = {
+      value: response,
+      expiresAt: Date.now() + FLYERS_CACHE_MS,
+    };
+    res.set("Cache-Control", "public, max-age=300");
+    res.json(response);
   } catch (err) {
     console.error("Erro ao carregar flyers:", err.message);
     res.json([]);
@@ -1615,6 +1731,7 @@ app.put(
       if (oldPath) {
         await supabase.storage.from("cursos").remove([oldPath]);
       }
+      flyersResponseCache = { expiresAt: 0, value: null };
       res.json({ sucesso: true });
     } catch (err) {
       console.error("Erro ao salvar flyer:", err.message);
@@ -1638,6 +1755,7 @@ app.delete("/admin/flyers/:slot", requireAdmin, async (req, res) => {
       detalhes: JSON.stringify(paths),
     });
     if (oldPath) await supabase.storage.from("cursos").remove([oldPath]);
+    flyersResponseCache = { expiresAt: 0, value: null };
     res.json({ sucesso: true });
   } catch (err) {
     console.error("Erro ao remover flyer:", err.message);
@@ -2010,6 +2128,12 @@ app.post("/cursos/:curso/respostas", requireMember, async (req, res) => {
 
 app.get("/manutencao", async (req, res) => {
   try {
+    if (
+      maintenanceResponseCache.value &&
+      Date.now() < maintenanceResponseCache.expiresAt
+    ) {
+      return res.json(maintenanceResponseCache.value);
+    }
     const { data, error } = await supabase
       .from("logs")
       .select("detalhes, created_at")
@@ -2030,10 +2154,15 @@ app.get("/manutencao", async (req, res) => {
       detalhes = {};
     }
 
-    res.json({
+    const response = {
       ativo: Boolean(detalhes.ativo),
       atualizado_em: data?.created_at || null,
-    });
+    };
+    maintenanceResponseCache = {
+      value: response,
+      expiresAt: Date.now() + MAINTENANCE_CACHE_MS,
+    };
+    res.json(response);
   } catch (err) {
     console.error("Erro manutencao:", err);
     res.json({ ativo: false });
@@ -2055,6 +2184,11 @@ app.patch("/manutencao", async (req, res) => {
       admin,
       detalhes: JSON.stringify({ ativo }),
     });
+
+    maintenanceResponseCache = {
+      value: { ativo, atualizado_em: new Date().toISOString() },
+      expiresAt: Date.now() + MAINTENANCE_CACHE_MS,
+    };
 
     res.json({ sucesso: true, ativo });
   } catch (err) {
@@ -2351,7 +2485,9 @@ app.get("/multas", async (req, res) => {
 
     let query = supabase
       .from("multas")
-      .select("*")
+      .select(
+        "id, created_at, discord_id, nome, valor, motivo, observacao, aplicada_por, status",
+      )
       .order("created_at", { ascending: false });
 
     if (status && status !== "todas") {
@@ -2379,7 +2515,9 @@ app.get("/multas/:discord_id", async (req, res) => {
 
     let query = supabase
       .from("multas")
-      .select("*")
+      .select(
+        "id, created_at, discord_id, nome, valor, motivo, observacao, aplicada_por, status",
+      )
       .eq("discord_id", String(discord_id))
       .order("created_at", { ascending: false });
 
