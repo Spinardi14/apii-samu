@@ -809,7 +809,6 @@ app.get("/portal/aniversariantes", requireMember, async (req, res) => {
         };
       })
       .sort((a, b) => a.distance - b.distance || a.nome.localeCompare(b.nome, "pt-BR"))
-      .slice(0, 2)
       .map(({ distance, ...member }) => member);
 
     birthdayResponseCache = {
