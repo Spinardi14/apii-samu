@@ -723,9 +723,16 @@ app.post("/portal/login", async (req, res) => {
       .from("membros_portal")
       .update({ last_seen_at: new Date().toISOString() })
       .eq("id", member.id);
+    // Nao deixa o login ficar travado caso o Discord ou o bot demore.
+    // Se a consulta nao terminar em 5 segundos, o login continua sem o cargo.
+    const cargoDiscord = await Promise.race([
+      getMemberHierarchyRole(member.discord_id),
+      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
+
     const memberWithRole = {
       ...member,
-      cargo_discord: await getMemberHierarchyRole(member.discord_id),
+      cargo_discord: cargoDiscord,
     };
     const token = createMemberToken(memberWithRole);
     res.json({ sucesso: true, token, membro: publicMember(memberWithRole) });
