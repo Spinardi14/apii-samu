@@ -172,6 +172,8 @@ const client = new Client({
 
 let guildCache = null;
 let discordPreparationPromise = null;
+let discordLoginInProgress = false;
+let discordLoginRetryTimer = null;
 
 // Sobe a API imediatamente, sem depender da conexão com o Discord.
 // Isso evita que o Render fique aguardando o evento do bot para liberar a porta HTTP.
@@ -236,6 +238,42 @@ client.once("clientReady", onDiscordReady);
 async function getGuild() {
   return initializeDiscordGuild();
 }
+
+function scheduleDiscordLoginRetry(delayMs = 15000) {
+  if (discordLoginRetryTimer || client.isReady()) return;
+  discordLoginRetryTimer = setTimeout(() => {
+    discordLoginRetryTimer = null;
+    connectDiscord();
+  }, delayMs);
+}
+
+async function connectDiscord() {
+  if (client.isReady() || discordLoginInProgress) return;
+
+  const token = String(process.env.DISCORD_TOKEN || "").trim();
+  if (!token) {
+    console.error("DISCORD_TOKEN nao configurado no ambiente.");
+    return;
+  }
+
+  discordLoginInProgress = true;
+  try {
+    await client.login(token);
+  } catch (err) {
+    console.error("Erro ao conectar Discord:", err.message || err);
+    scheduleDiscordLoginRetry();
+  } finally {
+    discordLoginInProgress = false;
+  }
+}
+
+client.on("error", (err) => {
+  console.error("Erro do cliente Discord:", err.message || err);
+});
+
+client.on("shardError", (err) => {
+  console.error("Erro de conexao com o Discord:", err.message || err);
+});
 
 async function getMemberHierarchyRole(discordId) {
   const id = String(discordId || "").trim();
@@ -2782,6 +2820,4 @@ app.get("/publicacoes", async (req, res) => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN).catch((err) => {
-  console.error("Erro ao conectar Discord:", err);
-});
+connectDiscord();
