@@ -171,6 +171,7 @@ const client = new Client({
 });
 
 let guildCache = null;
+let discordPreparationPromise = null;
 
 // Sobe a API imediatamente, sem depender da conexão com o Discord.
 // Isso evita que o Render fique aguardando o evento do bot para liberar a porta HTTP.
@@ -178,33 +179,62 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`API rodando na porta ${PORT}`);
 });
 
-// Inicializa o Discord separadamente da API.
-client.once("clientReady", async () => {
-  console.log(`Bot online: ${client.user.tag}`);
+function waitForDiscordReady(timeoutMs = 20000) {
+  if (client.isReady()) return Promise.resolve();
 
-  try {
-    guildCache = await client.guilds.fetch(GUILD_ID);
-    await guildCache.roles.fetch();
-    await guildCache.channels.fetch();
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      client.off("ready", finish);
+      client.off("clientReady", finish);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      client.off("ready", finish);
+      client.off("clientReady", finish);
+      reject(new Error("Discord ainda nao esta conectado"));
+    }, timeoutMs);
 
-    try {
-      await guildCache.members.fetch();
-      console.log("Membros carregados em cache.");
-    } catch (err) {
-      console.error("Aviso ao carregar membros:", err.message);
-    }
+    // Compatibilidade com versoes diferentes do discord.js.
+    client.once("ready", finish);
+    client.once("clientReady", finish);
+  });
+}
 
-    console.log("Discord inicializado.");
-  } catch (err) {
-    console.error("Erro ao preparar servidor:", err.message);
+async function prepareDiscordGuild() {
+  await waitForDiscordReady();
+  if (!GUILD_ID) throw new Error("GUILD_ID nao configurado");
+
+  guildCache = guildCache || (await client.guilds.fetch(GUILD_ID));
+  await guildCache.roles.fetch();
+  await guildCache.channels.fetch();
+  await guildCache.members.fetch();
+  return guildCache;
+}
+
+function initializeDiscordGuild() {
+  if (!discordPreparationPromise) {
+    discordPreparationPromise = prepareDiscordGuild().catch((err) => {
+      discordPreparationPromise = null;
+      throw err;
+    });
   }
-});
+  return discordPreparationPromise;
+}
+
+// Inicializa o Discord separadamente da API. Os dois nomes mantem
+// compatibilidade com versoes antigas e atuais do discord.js.
+const onDiscordReady = () => {
+  console.log(`Bot online: ${client.user.tag}`);
+  initializeDiscordGuild()
+    .then(() => console.log("Discord inicializado e membros carregados."))
+    .catch((err) => console.error("Erro ao preparar servidor:", err.message));
+};
+client.once("ready", onDiscordReady);
+client.once("clientReady", onDiscordReady);
 
 async function getGuild() {
-  if (!guildCache) {
-    guildCache = await client.guilds.fetch(GUILD_ID);
-  }
-  return guildCache;
+  return initializeDiscordGuild();
 }
 
 async function getMemberHierarchyRole(discordId) {
@@ -723,16 +753,9 @@ app.post("/portal/login", async (req, res) => {
       .from("membros_portal")
       .update({ last_seen_at: new Date().toISOString() })
       .eq("id", member.id);
-    // Nao deixa o login ficar travado caso o Discord ou o bot demore.
-    // Se a consulta nao terminar em 5 segundos, o login continua sem o cargo.
-    const cargoDiscord = await Promise.race([
-      getMemberHierarchyRole(member.discord_id),
-      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
-    ]);
-
     const memberWithRole = {
       ...member,
-      cargo_discord: cargoDiscord,
+      cargo_discord: await getMemberHierarchyRole(member.discord_id),
     };
     const token = createMemberToken(memberWithRole);
     res.json({ sucesso: true, token, membro: publicMember(memberWithRole) });
@@ -2671,7 +2694,7 @@ app.get("/patrulhamento", async (req, res) => {
     res.json({ total });
   } catch (err) {
     console.error("Erro PTR:", err.message);
-    res.json({ total: 0 });
+    res.status(503).json({ erro: "Discord temporariamente indisponivel" });
   }
 });
 
@@ -2698,7 +2721,7 @@ app.get("/contador", async (req, res) => {
     res.json({ total: role.members.size, online: onlineCount });
   } catch (err) {
     console.error("Erro contador:", err.message);
-    res.json({ total: 0, online: 0 });
+    res.status(503).json({ erro: "Discord temporariamente indisponivel" });
   }
 });
 
@@ -2755,7 +2778,7 @@ app.get("/publicacoes", async (req, res) => {
     res.json(lista);
   } catch (err) {
     console.error("Erro publicacoes:", err.message);
-    res.json([]);
+    res.status(503).json({ erro: "Discord temporariamente indisponivel" });
   }
 });
 
