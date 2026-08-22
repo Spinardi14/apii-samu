@@ -3,8 +3,13 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
+const dns = require("dns");
 const { Client, GatewayIntentBits, ChannelType } = require("discord.js");
 const { createClient } = require("@supabase/supabase-js");
+
+// Algumas instancias do Render resolvem o Discord por IPv6, mas nao conseguem
+// concluir essa rota. Priorizar IPv4 evita o login ficar preso ate o timeout.
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(cors());
