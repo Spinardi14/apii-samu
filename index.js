@@ -263,6 +263,26 @@ async function fetchDiscordDiagnostic(url, options = {}, timeoutMs = 10000) {
   }
 }
 
+async function discordRateLimitError(response) {
+  let retrySeconds = Number(response.headers.get("retry-after"));
+  if (!Number.isFinite(retrySeconds) || retrySeconds <= 0) {
+    try {
+      const body = await response.clone().json();
+      retrySeconds = Number(body?.retry_after);
+    } catch {}
+  }
+
+  // Bloqueios do Cloudflare nem sempre enviam retry_after. Nesse caso,
+  // aguarda uma hora para nao prolongar a restricao do IP compartilhado.
+  if (!Number.isFinite(retrySeconds) || retrySeconds <= 0) retrySeconds = 3600;
+
+  const err = new Error(
+    `Discord limitou temporariamente o IP (HTTP 429). Nova tentativa em ${Math.ceil(retrySeconds)} segundos`,
+  );
+  err.retryMs = Math.ceil(retrySeconds * 1000) + 1000;
+  return err;
+}
+
 async function diagnoseDiscordConnection(token) {
   if (discordDiagnosticPassed) return true;
 
@@ -271,7 +291,12 @@ async function diagnoseDiscordConnection(token) {
       "https://discord.com/api/v10/gateway",
     );
     console.log(`Diagnostico Discord API publica: HTTP ${gatewayResponse.status}`);
+    if (gatewayResponse.status === 429) {
+      throw await discordRateLimitError(gatewayResponse);
+    }
+    if (!gatewayResponse.ok) return false;
   } catch (err) {
+    if (err.retryMs) throw err;
     console.error(
       "Diagnostico Discord API publica falhou:",
       err.name === "AbortError" ? "timeout de rede" : err.message,
@@ -285,6 +310,9 @@ async function diagnoseDiscordConnection(token) {
       { headers: { Authorization: `Bot ${token}` } },
     );
     console.log(`Diagnostico token Discord: HTTP ${authResponse.status}`);
+    if (authResponse.status === 429) {
+      throw await discordRateLimitError(authResponse);
+    }
     if (authResponse.status === 401 || authResponse.status === 403) {
       console.error("DISCORD_TOKEN invalido, expirado ou sem autorizacao.");
       return false;
@@ -292,6 +320,7 @@ async function diagnoseDiscordConnection(token) {
     discordDiagnosticPassed = authResponse.ok;
     return discordDiagnosticPassed;
   } catch (err) {
+    if (err.retryMs) throw err;
     console.error(
       "Diagnostico autenticado do Discord falhou:",
       err.name === "AbortError" ? "timeout de rede" : err.message,
@@ -337,7 +366,7 @@ async function connectDiscord() {
     try {
       client.destroy();
     } catch {}
-    scheduleDiscordLoginRetry(15000);
+    scheduleDiscordLoginRetry(err.retryMs || 15000);
   } finally {
     if (loginTimeout) clearTimeout(loginTimeout);
     discordLoginInProgress = false;
