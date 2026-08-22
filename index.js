@@ -179,6 +179,7 @@ let guildCache = null;
 let discordPreparationPromise = null;
 let discordLoginInProgress = false;
 let discordLoginRetryTimer = null;
+let discordDiagnosticPassed = false;
 
 // Sobe a API imediatamente, sem depender da conexão com o Discord.
 // Isso evita que o Render fique aguardando o evento do bot para liberar a porta HTTP.
@@ -252,6 +253,53 @@ function scheduleDiscordLoginRetry(delayMs = 15000) {
   }, delayMs);
 }
 
+async function fetchDiscordDiagnostic(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function diagnoseDiscordConnection(token) {
+  if (discordDiagnosticPassed) return true;
+
+  try {
+    const gatewayResponse = await fetchDiscordDiagnostic(
+      "https://discord.com/api/v10/gateway",
+    );
+    console.log(`Diagnostico Discord API publica: HTTP ${gatewayResponse.status}`);
+  } catch (err) {
+    console.error(
+      "Diagnostico Discord API publica falhou:",
+      err.name === "AbortError" ? "timeout de rede" : err.message,
+    );
+    return false;
+  }
+
+  try {
+    const authResponse = await fetchDiscordDiagnostic(
+      "https://discord.com/api/v10/users/@me",
+      { headers: { Authorization: `Bot ${token}` } },
+    );
+    console.log(`Diagnostico token Discord: HTTP ${authResponse.status}`);
+    if (authResponse.status === 401 || authResponse.status === 403) {
+      console.error("DISCORD_TOKEN invalido, expirado ou sem autorizacao.");
+      return false;
+    }
+    discordDiagnosticPassed = authResponse.ok;
+    return discordDiagnosticPassed;
+  } catch (err) {
+    console.error(
+      "Diagnostico autenticado do Discord falhou:",
+      err.name === "AbortError" ? "timeout de rede" : err.message,
+    );
+    return false;
+  }
+}
+
 async function connectDiscord() {
   if (client.isReady() || discordLoginInProgress) return;
 
@@ -264,6 +312,10 @@ async function connectDiscord() {
   discordLoginInProgress = true;
   let loginTimeout = null;
   try {
+    const discordReachable = await diagnoseDiscordConnection(token);
+    if (!discordReachable) {
+      throw new Error("Falha no diagnostico de acesso ao Discord");
+    }
     console.log("Iniciando conexao com o Discord...");
     await Promise.race([
       client.login(token),
