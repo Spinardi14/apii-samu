@@ -21,7 +21,7 @@ const GUILD_ID = process.env.GUILD_ID;
 const ROLE_PRESIDENTE = process.env.ROLE_PRESIDENTE;
 const ROLE_VICE = process.env.ROLE_VICE;
 const ROLE_CORREGEDORIA = process.env.ROLE_CORREGEDORIA;
-const CHANNEL_PUBLICACOES = process.env.CHANNEL_PUBLICACOES;
+const CHANNEL_PUBLICACOES = "1370530159899181227";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -193,18 +193,14 @@ function waitForDiscordReady(timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const finish = () => {
       clearTimeout(timer);
-      client.off("ready", finish);
       client.off("clientReady", finish);
       resolve();
     };
     const timer = setTimeout(() => {
-      client.off("ready", finish);
       client.off("clientReady", finish);
       reject(new Error("Discord ainda nao esta conectado"));
     }, timeoutMs);
 
-    // Compatibilidade com versoes diferentes do discord.js.
-    client.once("ready", finish);
     client.once("clientReady", finish);
   });
 }
@@ -230,15 +226,13 @@ function initializeDiscordGuild() {
   return discordPreparationPromise;
 }
 
-// Inicializa o Discord separadamente da API. Os dois nomes mantem
-// compatibilidade com versoes antigas e atuais do discord.js.
+// Inicializa o Discord separadamente da API.
 const onDiscordReady = () => {
   console.log(`Bot online: ${client.user.tag}`);
   initializeDiscordGuild()
     .then(() => console.log("Discord inicializado e membros carregados."))
     .catch((err) => console.error("Erro ao preparar servidor:", err.message));
 };
-client.once("ready", onDiscordReady);
 client.once("clientReady", onDiscordReady);
 
 async function getGuild() {
@@ -2829,7 +2823,6 @@ app.delete("/multas/:id", async (req, res) => {
 app.get("/patrulhamento", async (req, res) => {
   try {
     const guild = await getGuild();
-    await guild.channels.fetch();
     const canais = guild.channels.cache.filter(
       (c) => c.parentId === CATEGORIA_PTR && c.type === ChannelType.GuildVoice,
     );
@@ -2910,9 +2903,13 @@ app.get("/membros", async (req, res) => {
 app.get("/publicacoes", async (req, res) => {
   try {
     const guild = await getGuild();
-    await guild.roles.fetch();
-    const canal = await client.channels.fetch(CHANNEL_PUBLICACOES);
-    const mensagens = await canal.messages.fetch({ limit: 2 });
+    const canal =
+      guild.channels.cache.get(CHANNEL_PUBLICACOES) ||
+      (await guild.channels.fetch(CHANNEL_PUBLICACOES));
+    if (!canal || !canal.isTextBased()) {
+      throw new Error("Canal de decretos nao encontrado ou nao e textual");
+    }
+    const mensagens = await canal.messages.fetch({ limit: 2, cache: false });
     const lista = mensagens.map((m) => ({
       autor: m.author.username,
       avatar: m.author.displayAvatarURL(),
