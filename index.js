@@ -257,12 +257,32 @@ async function connectDiscord() {
   }
 
   discordLoginInProgress = true;
+  let loginTimeout = null;
   try {
-    await client.login(token);
+    console.log("Iniciando conexao com o Discord...");
+    await Promise.race([
+      client.login(token),
+      new Promise((_, reject) => {
+        loginTimeout = setTimeout(
+          () => reject(new Error("Tempo limite ao conectar com o Discord")),
+          30000,
+        );
+      }),
+    ]);
+
+    if (!client.isReady()) {
+      await waitForDiscordReady(10000);
+    }
   } catch (err) {
     console.error("Erro ao conectar Discord:", err.message || err);
-    scheduleDiscordLoginRetry();
+    guildCache = null;
+    discordPreparationPromise = null;
+    try {
+      client.destroy();
+    } catch {}
+    scheduleDiscordLoginRetry(15000);
   } finally {
+    if (loginTimeout) clearTimeout(loginTimeout);
     discordLoginInProgress = false;
   }
 }
